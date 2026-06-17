@@ -1,4 +1,5 @@
 import type { AppActions, AppData, StationStatus } from '../appTypes';
+import { isStationBlocked, stationAccessLabel } from '../stations';
 
 type Props = Pick<
   AppData,
@@ -78,17 +79,7 @@ export function StationsPage({
       </section>
 
       <section className="content-grid">
-        <article className="panel">
-          <div className="panel-header">
-            <div>
-              <h2>Colonnine</h2>
-              <p>Elenco iniziale con spazio per stato, posizione e dettaglio.</p>
-            </div>
-            <button className="ghost-button" type="button" onClick={() => actions.openModal('station-location')}>
-              Modifica posizione
-            </button>
-          </div>
-
+        <article className="panel panel-table">
           {loadingStations ? (
             <div className="empty-state">Caricamento colonnine...</div>
           ) : stationError ? (
@@ -105,12 +96,14 @@ export function StationsPage({
                     <th>Peer</th>
                     <th>Boot</th>
                     <th>Posizione</th>
+                    <th>Azioni</th>
                   </tr>
                 </thead>
                 <tbody>
                   {stations.map((station) => {
                     const isSelected = station.station_id === selectedStation?.station_id;
                     const status = getStationStatus(station);
+                    const blocked = isStationBlocked(station);
                     return (
                       <tr
                         key={station.station_id}
@@ -123,14 +116,40 @@ export function StationsPage({
                         </td>
                         <td>{station.ocpp_version}</td>
                         <td>
-                          <span className={`pill ${station.blocked ? 'pill-error' : `pill-${status}`}`}>
-                            {station.blocked ? 'bloccata' : status}
+                          <span className={`pill ${blocked ? 'pill-error' : `pill-${status}`}`}>
+                            {blocked ? 'bloccata' : status}
                           </span>
                         </td>
                         <td>{timeAgo(station.last_seen_at)}</td>
                         <td>{station.peer_addr}</td>
                         <td>{station.boot_count}</td>
                         <td>{formatLocation(station)}</td>
+                        <td>
+                          <div className="row-actions">
+                            <button
+                              className="ghost-button small-button"
+                              type="button"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                actions.selectStation(station.station_id);
+                                actions.openModal('station-location');
+                              }}
+                            >
+                              Posizione
+                            </button>
+                            <button
+                              className="ghost-button small-button"
+                              type="button"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                actions.selectStation(station.station_id);
+                                actions.openModal('station-controls');
+                              }}
+                            >
+                              Gestione
+                            </button>
+                          </div>
+                        </td>
                       </tr>
                     );
                   })}
@@ -144,7 +163,7 @@ export function StationsPage({
           <div className="panel-header">
             <div>
               <h2>Dettaglio</h2>
-              <p>Pannello pronto per form, log e posizione geografica.</p>
+              <p>Infomrazioni sullo stato della colonnina e dei suoi connettori</p>
             </div>
           </div>
 
@@ -157,7 +176,7 @@ export function StationsPage({
                 <div className="detail-line"><span>Peer</span><strong>{selectedStation.peer_addr}</strong></div>
                 <div className="detail-line"><span>Stato OCPP</span><strong>{selectedStation.current_status ?? 'n/a'}</strong></div>
                 <div className="detail-line"><span>Errore</span><strong>{selectedStation.current_error_code ?? 'n/a'}</strong></div>
-                <div className="detail-line"><span>Blocco</span><strong>{selectedStation.blocked ? 'Bloccata' : 'Attiva'}</strong></div>
+                <div className="detail-line"><span>Accesso</span><strong>{stationAccessLabel(selectedStation)}</strong></div>
                 <div className="detail-line"><span>Posizione</span><strong>{formatLocation(selectedStation)}</strong></div>
                 <div className="detail-line"><span>Connettori</span><strong>{stationConnectors.filter((connector) => connector.station_id === selectedStation.station_id).length}</strong></div>
                 <div className="detail-line">
@@ -168,22 +187,6 @@ export function StationsPage({
                       : 'n/a'}
                   </strong>
                 </div>
-                <button
-                  className="primary-button"
-                  type="button"
-                  disabled={!selectedStation}
-                  onClick={() => actions.openModal('station-location')}
-                >
-                  Modifica posizione
-                </button>
-                <button
-                  className="ghost-button"
-                  type="button"
-                  disabled={!selectedStation}
-                  onClick={() => actions.openModal('station-controls')}
-                >
-                  Gestione colonnina
-                </button>
               </div>
 
               <div className="detail-card muted">

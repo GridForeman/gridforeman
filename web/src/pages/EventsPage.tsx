@@ -49,7 +49,9 @@ export function EventsPage({ stations }: Props) {
   const [stationFilter, setStationFilter] = useState<string>('');
   const [filterOpen, setFilterOpen] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
 
   const stationNameOptions = useMemo(() => {
     const options: Array<{ value: string; label: string }> = [{ value: '', label: 'Tutte le colonnine' }];
@@ -70,16 +72,22 @@ export function EventsPage({ stations }: Props) {
   }, [stations]);
 
   async function loadEvents() {
-    setLoading(true);
+    if (!hasLoadedOnce) {
+      setLoading(true);
+    } else {
+      setRefreshing(true);
+    }
     setError(null);
     try {
       const data = await fetchEvents(200, stationFilter || null);
       setEvents(data);
       setSelectedEventId((current) => current ?? data[0]?.message_id ?? null);
+      setHasLoadedOnce(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Errore caricando gli eventi');
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   }
 
@@ -107,7 +115,7 @@ export function EventsPage({ stations }: Props) {
 
   return (
     <section className="content-grid events-grid">
-      <article className="panel">
+      <article className="panel panel-table">
         <div className="panel-header">
           <div>
             <h2>Eventi OCPP</h2>
@@ -153,8 +161,8 @@ export function EventsPage({ stations }: Props) {
                 </div>
               ) : null}
             </div>
-            <button className="ghost-button" type="button" onClick={() => void loadEvents()}>
-              Aggiorna
+            <button className="ghost-button" type="button" disabled={loading || refreshing} onClick={() => void loadEvents()}>
+              {refreshing ? 'Aggiorno...' : 'Aggiorna'}
             </button>
           </div>
         </div>

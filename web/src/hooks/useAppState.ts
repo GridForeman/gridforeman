@@ -22,7 +22,7 @@ import {
   type StationSummary,
   type User,
 } from '../api';
-import type { AppData, ModalKind, StationStatus } from '../appTypes';
+import type { AppData, BackendStatus, ModalKind, StationStatus } from '../appTypes';
 
 const HEARTBEAT_OFFLINE_AFTER_MS = 2 * 60 * 1000;
 
@@ -84,6 +84,9 @@ export function useAppState(options: Options = {}) {
   const [stationConnectorsError, setStationConnectorsError] = useState<string | null>(null);
   const [userError, setUserError] = useState<string | null>(null);
   const [badgeError, setBadgeError] = useState<string | null>(null);
+  const [backendStatus, setBackendStatus] = useState<BackendStatus>('connecting');
+  const [backendStatusDetail, setBackendStatusDetail] = useState('Connessione iniziale');
+  const [lastSyncAt, setLastSyncAt] = useState<string | null>(null);
 
   const [saving, setSaving] = useState(false);
   const [stationCommandBusy, setStationCommandBusy] = useState(false);
@@ -106,42 +109,65 @@ export function useAppState(options: Options = {}) {
     notes: '',
   });
 
-  async function loadStations() {
-    setLoadingStations(true);
+  function markSyncSuccess(detail?: string) {
+    if (detail) {
+      setBackendStatus('connected');
+      setBackendStatusDetail(detail);
+    }
+    setLastSyncAt(new Date().toISOString());
+  }
+
+  async function loadStations(keepVisible = true) {
+    if (!keepVisible) {
+      setLoadingStations(true);
+    }
     setStationError(null);
     try {
       const data = sortStations(await fetchStations());
       setStations(data);
       setSelectedStationId((current) => current ?? data[0]?.station_id ?? null);
+      markSyncSuccess();
     } catch (err) {
+      setBackendStatus((current) => (current === 'connected' ? 'degraded' : current));
+      setBackendStatusDetail('Errore lettura colonnine');
       setStationError(err instanceof Error ? err.message : 'Errore caricando le colonnine');
     } finally {
       setLoadingStations(false);
     }
   }
 
-  async function loadUsers() {
-    setLoadingUsers(true);
+  async function loadUsers(keepVisible = true) {
+    if (!keepVisible) {
+      setLoadingUsers(true);
+    }
     setUserError(null);
     try {
       const data = await fetchUsers();
       setUsers(data);
       setSelectedUserId((current) => current ?? data[0]?.id ?? null);
+      markSyncSuccess();
     } catch (err) {
+      setBackendStatus((current) => (current === 'connected' ? 'degraded' : current));
+      setBackendStatusDetail('Errore lettura utenti');
       setUserError(err instanceof Error ? err.message : 'Errore caricando gli utenti');
     } finally {
       setLoadingUsers(false);
     }
   }
 
-  async function loadBadges() {
-    setLoadingBadges(true);
+  async function loadBadges(keepVisible = true) {
+    if (!keepVisible) {
+      setLoadingBadges(true);
+    }
     setBadgeError(null);
     try {
       const data = await fetchBadges();
       setBadges(data);
       setSelectedBadgeId((current) => current ?? data[0]?.id ?? null);
+      markSyncSuccess();
     } catch (err) {
+      setBackendStatus((current) => (current === 'connected' ? 'degraded' : current));
+      setBackendStatusDetail('Errore lettura badge');
       setBadgeError(err instanceof Error ? err.message : 'Errore caricando i badge');
     } finally {
       setLoadingBadges(false);
@@ -149,22 +175,26 @@ export function useAppState(options: Options = {}) {
   }
 
   useEffect(() => {
-    void loadStations();
-    void loadUsers();
-    void loadBadges();
+    void loadStations(false);
+    void loadUsers(false);
+    void loadBadges(false);
   }, []);
 
   useEffect(() => {
     let reconnectTimer: number | null = null;
     let closed = false;
     let socket: WebSocket | null = null;
+    let seenMessage = false;
 
     function connect() {
+      setBackendStatus((current) => (current === 'connected' ? 'reconnecting' : 'connecting'));
+      setBackendStatusDetail(seenMessage ? 'Riconnessione realtime' : 'Connessione realtime');
       socket = openRealtimeStateSocket();
 
       socket.onmessage = (event) => {
         try {
           const snapshot = JSON.parse(event.data) as RealtimeStateSnapshot;
+          seenMessage = true;
           const stations = sortStations(snapshot.stations);
           setStations(stations);
           setStationConnectors(snapshot.connectors);
@@ -173,18 +203,25 @@ export function useAppState(options: Options = {}) {
           setStationConnectorsError(null);
           setLoadingStations(false);
           setLoadingStationConnectors(false);
+          markSyncSuccess('Realtime attivo');
         } catch (err) {
+          setBackendStatus('degraded');
+          setBackendStatusDetail('Snapshot realtime non valido');
           setStationError(err instanceof Error ? err.message : 'Realtime state non valido');
         }
       };
 
       socket.onerror = () => {
+        setBackendStatus('degraded');
+        setBackendStatusDetail('Realtime non disponibile');
         setStationError('Connessione realtime stato non disponibile');
         void loadStations();
       };
 
       socket.onclose = () => {
         if (closed) return;
+        setBackendStatus(seenMessage ? 'reconnecting' : 'degraded');
+        setBackendStatusDetail(seenMessage ? 'Realtime interrotto' : 'Realtime non disponibile');
         reconnectTimer = window.setTimeout(connect, 2000);
       };
     }
@@ -441,6 +478,7 @@ export function useAppState(options: Options = {}) {
     setStations((current) => sortStations(
       current.map((station) => (station.station_id === updated.station_id ? updated : station)),
     ));
+    markSyncSuccess();
     if (selectedStationId === updated.station_id) {
       setSelectedStationId(updated.station_id);
     }
@@ -449,6 +487,7 @@ export function useAppState(options: Options = {}) {
   async function syncStationConnectors(stationId: string) {
     const connectors = await fetchStationConnectors(stationId);
     setStationConnectors(connectors);
+    markSyncSuccess();
   }
 
   async function syncStationSnapshot(stationId: string) {
@@ -542,6 +581,9 @@ export function useAppState(options: Options = {}) {
     activeUsers,
     activeBadges,
     assignedBadges,
+    backendStatus,
+    backendStatusDetail,
+    lastSyncAt,
   };
 
   return {

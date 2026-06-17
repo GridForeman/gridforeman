@@ -2,6 +2,7 @@ import type { Badge, ConnectorSummary, StationSummary, User } from './api';
 
 export type AppRoute = '/stations' | '/users' | '/badges' | '/events' | '/transactions';
 export type StationStatus = 'online' | 'offline' | 'error';
+export type BackendStatus = 'connecting' | 'connected' | 'reconnecting' | 'degraded';
 export type ModalKind =
   | 'station-location'
   | 'station-controls'
@@ -36,6 +37,9 @@ export type AppData = {
   activeUsers: number;
   activeBadges: number;
   assignedBadges: number;
+  backendStatus: BackendStatus;
+  backendStatusDetail: string;
+  lastSyncAt: string | null;
 };
 
 export type AppActions = {

@@ -21,6 +21,7 @@ function timeAgo(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   const minutes = Math.max(0, Math.round((Date.now() - date.getTime()) / 60000));
+  if (minutes < 1) return 'adesso';
   if (minutes < 60) return `${minutes} min fa`;
   const hours = Math.round(minutes / 60);
   if (hours < 24) return `${hours} h fa`;
@@ -75,6 +76,9 @@ export default function App() {
         title={title}
         onCreateUser={() => app.openModal('create-user')}
         onCreateBadge={() => app.openModal('create-badge')}
+        backendStatus={app.data.backendStatus}
+        backendStatusDetail={app.data.backendStatusDetail}
+        lastSyncLabel={app.data.lastSyncAt ? timeAgo(app.data.lastSyncAt) : 'mai'}
       >
         <Routes>
           <Route
@@ -113,8 +117,6 @@ export default function App() {
             element={(
               <UsersPage
                 users={app.data.users}
-                selectedUser={app.data.selectedUser}
-                selectedUserBadges={app.data.selectedUserBadges}
                 loadingUsers={app.data.loadingUsers}
                 userError={app.data.userError}
                 actions={{

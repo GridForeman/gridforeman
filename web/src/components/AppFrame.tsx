@@ -1,11 +1,15 @@
 import type { ReactNode } from 'react';
 import { NavLink } from 'react-router-dom';
+import type { BackendStatus } from '../appTypes';
 import type { AppRoute } from '../appTypes';
 
 type Props = {
   title: string;
   onCreateUser: () => void;
   onCreateBadge: () => void;
+  backendStatus: BackendStatus;
+  backendStatusDetail: string;
+  lastSyncLabel: string;
   children: ReactNode;
 };
 
@@ -21,7 +25,18 @@ function navClassName({ isActive }: { isActive: boolean }) {
   return `nav-item ${isActive ? 'active' : ''}`;
 }
 
-export function AppFrame({ title, onCreateUser, onCreateBadge, children }: Props) {
+export function AppFrame({
+  title,
+  onCreateUser,
+  onCreateBadge,
+  backendStatus,
+  backendStatusDetail,
+  lastSyncLabel,
+  children,
+}: Props) {
+  const backendStatusClassName = `status-dot status-dot-${backendStatus}`;
+  const showSyncInSidebar = backendStatus !== 'connected';
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -42,10 +57,13 @@ export function AppFrame({ title, onCreateUser, onCreateBadge, children }: Props
         </nav>
 
         <div className="sidebar-footer">
-          <div className="status-dot" />
+          <div className={backendStatusClassName} />
           <div>
             <div className="sidebar-footer-title">Backend</div>
-            <div className="sidebar-footer-subtitle">Connesso</div>
+            <div className="sidebar-footer-subtitle">{backendStatusDetail}</div>
+            {showSyncInSidebar ? (
+              <div className="sidebar-footer-meta">Ultimo sync: {lastSyncLabel}</div>
+            ) : null}
           </div>
         </div>
       </aside>
@@ -57,9 +75,6 @@ export function AppFrame({ title, onCreateUser, onCreateBadge, children }: Props
             <h1>{title}</h1>
           </div>
           <div className="topbar-actions">
-            <button className="ghost-button" type="button">
-              Esporta
-            </button>
             {title === 'Utenti' ? (
               <button className="primary-button" type="button" onClick={onCreateUser}>
                 Nuovo utente

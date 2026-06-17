@@ -168,12 +168,8 @@ export function TransactionsPage({ stations, users, badges }: Props) {
 
   return (
     <section className="content-grid transactions-grid">
-      <article className="panel">
+      <article className="panel panel-table">
         <div className="panel-header">
-          <div>
-            <h2>Transazioni</h2>
-            <p>Sessioni di ricarica tracciate per RFID, colonnina, durata ed energia.</p>
-          </div>
           <div className="topbar-actions transactions-toolbar">
             <label className="transactions-filter">
               <span className="transactions-filter-label">Utente</span>
@@ -209,7 +205,12 @@ export function TransactionsPage({ stations, users, badges }: Props) {
                 </select>
               </span>
             </label>
-            <button className="ghost-button" type="button" onClick={() => void loadTransactions(true)}>
+            <button
+              className="ghost-button toolbar-refresh-button"
+              type="button"
+              disabled={loading || refreshing}
+              onClick={() => void loadTransactions(true)}
+            >
               Aggiorna
             </button>
           </div>
