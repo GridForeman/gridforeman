@@ -1,6 +1,6 @@
-import type { Badge, ConnectorSummary, StationSummary, User } from './api';
+import type { Badge, ConnectorSummary, SiteConfigSnapshot, StationSummary, User } from './api';
 
-export type AppRoute = '/stations' | '/users' | '/badges' | '/events' | '/transactions';
+export type AppRoute = '/site' | '/stations' | '/users' | '/badges' | '/events' | '/transactions';
 export type StationStatus = 'online' | 'offline' | 'error';
 export type BackendStatus = 'connecting' | 'connected' | 'reconnecting' | 'degraded';
 export type ModalKind =
@@ -14,6 +14,7 @@ export type ModalKind =
 
 export type AppData = {
   stations: StationSummary[];
+  siteConfig?: SiteConfigSnapshot;
   users: User[];
   badges: Badge[];
   stationConnectors: ConnectorSummary[];

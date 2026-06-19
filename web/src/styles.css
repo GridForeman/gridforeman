@@ -515,6 +515,47 @@ th {
   align-items: start;
 }
 
+.site-config-grid {
+  grid-template-columns: 1.25fr 1fr;
+  align-items: start;
+}
+
+.site-group-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+}
+
+.site-config-card {
+  padding: 18px;
+}
+
+.site-config-checklist {
+  display: grid;
+  gap: 10px;
+}
+
+.site-config-checklist-title {
+  color: var(--muted);
+  font-size: 0.84rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.site-config-check {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(144, 163, 198, 0.16);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.site-config-check input {
+  margin: 0;
+}
+
 .transactions-metrics {
   margin: 0 0 18px;
 }

@@ -14,6 +14,7 @@ type Props = {
 };
 
 const routes: Array<{ to: AppRoute; label: string }> = [
+  { to: '/site', label: 'Impianto' },
   { to: '/stations', label: 'Colonnine' },
   { to: '/users', label: 'Utenti' },
   { to: '/badges', label: 'Badge' },

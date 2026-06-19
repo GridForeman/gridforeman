@@ -16,6 +16,7 @@ use crate::{
     db::StationSummary,
     greptime::OcppEventRow,
     realtime::{self, RealtimeNotifier, RealtimeState},
+    site_config::SiteConfigSnapshot,
     users::{NewUser, UserId},
 };
 
@@ -70,6 +71,10 @@ pub async fn run_api_server(
         .route("/api/badges", get(list_badges).post(create_badge))
         .route("/api/badges/{badge_id}", patch(update_badge))
         .route("/api/badges/{badge_id}/active", patch(set_badge_active))
+        .route(
+            "/api/site-config",
+            get(get_site_config).put(update_site_config),
+        )
         .route("/api/events", get(list_events))
         .route("/api/transactions", get(list_transactions))
         .route(
@@ -464,6 +469,29 @@ async fn list_transactions(
     state
         .db
         .list_transactions(limit)
+        .await
+        .map(Json)
+        .map_err(internal_error)
+}
+
+async fn get_site_config(
+    State(state): State<ApiState>,
+) -> Result<Json<SiteConfigSnapshot>, (StatusCode, String)> {
+    state
+        .db
+        .load_site_config()
+        .await
+        .map(Json)
+        .map_err(internal_error)
+}
+
+async fn update_site_config(
+    State(state): State<ApiState>,
+    Json(payload): Json<SiteConfigSnapshot>,
+) -> Result<Json<SiteConfigSnapshot>, (StatusCode, String)> {
+    state
+        .db
+        .save_site_config(payload)
         .await
         .map(Json)
         .map_err(internal_error)

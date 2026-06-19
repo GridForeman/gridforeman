@@ -7,6 +7,7 @@ use tokio_postgres::{Client, Error, NoTls};
 
 use crate::badges::{Badge, BadgeId, NewBadge};
 use crate::greptime::{ChargingMeasurementRecord, GreptimeWriter, OcppMessageRecord};
+use crate::site_config::{SiteConfigSnapshot, SiteConfigTopology};
 use crate::users::{NewUser, User, UserId};
 
 #[derive(Clone)]
@@ -291,6 +292,29 @@ impl Database {
                 CREATE UNIQUE INDEX IF NOT EXISTS charging_transactions_station_tx_ref_idx
                     ON charging_transactions (station_id, ocpp_transaction_ref)
                     WHERE ocpp_transaction_ref IS NOT NULL;
+
+                CREATE TABLE IF NOT EXISTS site_settings (
+                    site_key TEXT PRIMARY KEY,
+                    site_name TEXT,
+                    timezone TEXT NOT NULL DEFAULT 'Europe/Zurich',
+                    operator_name TEXT,
+                    notes TEXT,
+                    topology JSONB NOT NULL DEFAULT '{"power_feeds":[],"management_groups":[]}'::JSONB,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+
+                ALTER TABLE site_settings
+                    ADD COLUMN IF NOT EXISTS site_name TEXT;
+                ALTER TABLE site_settings
+                    ADD COLUMN IF NOT EXISTS timezone TEXT NOT NULL DEFAULT 'Europe/Zurich';
+                ALTER TABLE site_settings
+                    ADD COLUMN IF NOT EXISTS operator_name TEXT;
+                ALTER TABLE site_settings
+                    ADD COLUMN IF NOT EXISTS notes TEXT;
+                ALTER TABLE site_settings
+                    ADD COLUMN IF NOT EXISTS topology JSONB NOT NULL DEFAULT '{"power_feeds":[],"management_groups":[]}'::JSONB;
+                ALTER TABLE site_settings
+                    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
                 "#,
             )
             .await
@@ -930,6 +954,94 @@ impl Database {
         }))
     }
 
+    pub async fn load_site_config(
+        &self,
+    ) -> Result<SiteConfigSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+        let row = self
+            .client
+            .query_opt(
+                r#"
+                SELECT
+                    site_name,
+                    timezone,
+                    operator_name,
+                    notes,
+                    topology::TEXT AS topology,
+                    updated_at
+                FROM site_settings
+                WHERE site_key = 'default'
+                "#,
+                &[],
+            )
+            .await?;
+
+        let Some(row) = row else {
+            return Ok(SiteConfigSnapshot::default());
+        };
+
+        let topology_text: String = row.get("topology");
+        let topology: SiteConfigTopology = serde_json::from_str(&topology_text)?;
+
+        Ok(SiteConfigSnapshot {
+            site_name: row.get("site_name"),
+            timezone: row.get("timezone"),
+            operator_name: row.get("operator_name"),
+            notes: row.get("notes"),
+            power_feeds: topology.power_feeds,
+            management_groups: topology.management_groups,
+            updated_at: row.get("updated_at"),
+        })
+    }
+
+    pub async fn save_site_config(
+        &self,
+        mut snapshot: SiteConfigSnapshot,
+    ) -> Result<SiteConfigSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+        normalize_and_validate_site_config(&mut snapshot, &self.list_stations().await?)?;
+
+        let topology = SiteConfigTopology {
+            power_feeds: snapshot.power_feeds.clone(),
+            management_groups: snapshot.management_groups.clone(),
+        };
+        let topology_json = serde_json::to_string(&topology)?;
+        let now = Utc::now();
+
+        self.client
+            .execute(
+                r#"
+                INSERT INTO site_settings (
+                    site_key,
+                    site_name,
+                    timezone,
+                    operator_name,
+                    notes,
+                    topology,
+                    updated_at
+                )
+                VALUES ('default', $1, $2, $3, $4, $5::TEXT::JSONB, $6)
+                ON CONFLICT (site_key) DO UPDATE SET
+                    site_name = EXCLUDED.site_name,
+                    timezone = EXCLUDED.timezone,
+                    operator_name = EXCLUDED.operator_name,
+                    notes = EXCLUDED.notes,
+                    topology = EXCLUDED.topology,
+                    updated_at = EXCLUDED.updated_at
+                "#,
+                &[
+                    &snapshot.site_name,
+                    &snapshot.timezone,
+                    &snapshot.operator_name,
+                    &snapshot.notes,
+                    &topology_json,
+                    &now,
+                ],
+            )
+            .await?;
+
+        snapshot.updated_at = Some(now);
+        Ok(snapshot)
+    }
+
     pub async fn create_user(&self, user: NewUser) -> Result<User, Error> {
         let now: DateTime<Utc> = Utc::now();
         let row = self
@@ -1485,4 +1597,128 @@ fn row_to_charging_transaction(row: &Row) -> ChargingTransaction {
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     }
+}
+
+fn normalize_optional_text(value: &mut Option<String>) {
+    if let Some(current) = value {
+        let trimmed = current.trim();
+        if trimmed.is_empty() {
+            *value = None;
+        } else if trimmed.len() != current.len() {
+            *current = trimmed.to_string();
+        }
+    }
+}
+
+fn normalize_required_text(value: &mut String, field: &str) -> Result<(), std::io::Error> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{field} obbligatorio"),
+        ));
+    }
+    if trimmed.len() != value.len() {
+        *value = trimmed.to_string();
+    }
+    Ok(())
+}
+
+fn normalize_and_validate_site_config(
+    snapshot: &mut SiteConfigSnapshot,
+    stations: &[StationSummary],
+) -> Result<(), std::io::Error> {
+    use std::collections::HashSet;
+
+    normalize_optional_text(&mut snapshot.site_name);
+    normalize_optional_text(&mut snapshot.operator_name);
+    normalize_optional_text(&mut snapshot.notes);
+    normalize_required_text(&mut snapshot.timezone, "timezone")?;
+
+    let mut feed_ids = HashSet::new();
+    for feed in &mut snapshot.power_feeds {
+        normalize_required_text(&mut feed.id, "id feed")?;
+        normalize_required_text(&mut feed.name, "nome feed")?;
+        normalize_optional_text(&mut feed.meter_label);
+        normalize_optional_text(&mut feed.notes);
+        if let Some(max_current_a) = feed.max_current_a
+            && max_current_a <= 0.0
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("feed {} ha max_current_a non valido", feed.name),
+            ));
+        }
+        if !feed_ids.insert(feed.id.clone()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("feed duplicato: {}", feed.id),
+            ));
+        }
+    }
+
+    let station_ids = stations
+        .iter()
+        .map(|station| station.station_id.clone())
+        .collect::<HashSet<_>>();
+    let mut group_ids = HashSet::new();
+
+    for group in &mut snapshot.management_groups {
+        normalize_required_text(&mut group.id, "id gruppo")?;
+        normalize_required_text(&mut group.name, "nome gruppo")?;
+        normalize_required_text(&mut group.control_mode, "modalita gruppo")?;
+        normalize_optional_text(&mut group.notes);
+
+        if !group_ids.insert(group.id.clone()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("gruppo duplicato: {}", group.id),
+            ));
+        }
+
+        let mut dedup_feed_ids = HashSet::new();
+        group.power_feed_ids.retain(|feed_id| {
+            let trimmed = feed_id.trim();
+            !trimmed.is_empty() && dedup_feed_ids.insert(trimmed.to_string())
+        });
+        group.power_feed_ids = group
+            .power_feed_ids
+            .iter()
+            .map(|feed_id| feed_id.trim().to_string())
+            .collect();
+
+        for feed_id in &group.power_feed_ids {
+            if !feed_ids.contains(feed_id) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("gruppo {} referenzia feed inesistente {}", group.name, feed_id),
+                ));
+            }
+        }
+
+        let mut dedup_station_ids = HashSet::new();
+        group.station_ids.retain(|station_id| {
+            let trimmed = station_id.trim();
+            !trimmed.is_empty() && dedup_station_ids.insert(trimmed.to_string())
+        });
+        group.station_ids = group
+            .station_ids
+            .iter()
+            .map(|station_id| station_id.trim().to_string())
+            .collect();
+
+        for station_id in &group.station_ids {
+            if !station_ids.contains(station_id) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "gruppo {} referenzia colonnina inesistente {}",
+                        group.name, station_id
+                    ),
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }

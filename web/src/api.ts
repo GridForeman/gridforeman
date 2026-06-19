@@ -40,6 +40,33 @@ export type RealtimeStateSnapshot = {
   connectors: ConnectorSummary[];
 };
 
+export type SitePowerFeed = {
+  id: string;
+  name: string;
+  meter_label: string | null;
+  max_current_a: number | null;
+  notes: string | null;
+};
+
+export type SiteManagementGroup = {
+  id: string;
+  name: string;
+  control_mode: string;
+  power_feed_ids: string[];
+  station_ids: string[];
+  notes: string | null;
+};
+
+export type SiteConfigSnapshot = {
+  site_name: string | null;
+  timezone: string;
+  operator_name: string | null;
+  notes: string | null;
+  power_feeds: SitePowerFeed[];
+  management_groups: SiteManagementGroup[];
+  updated_at: string | null;
+};
+
 export async function fetchStations(): Promise<StationSummary[]> {
   const response = await fetch('/api/stations', { cache: 'no-store' });
   if (!response.ok) {
@@ -70,6 +97,36 @@ export async function updateStationLocation(
 
   if (!response.ok) {
     throw new Error(`PATCH /api/stations/${stationId}/location failed with ${response.status}`);
+  }
+
+  return response.json();
+}
+
+export async function fetchSiteConfig(): Promise<SiteConfigSnapshot> {
+  const response = await fetch('/api/site-config', { cache: 'no-store' });
+  if (!response.ok) {
+    throw new Error(`GET /api/site-config failed with ${response.status}`);
+  }
+
+  return response.json();
+}
+
+export async function updateSiteConfig(payload: SiteConfigSnapshot): Promise<SiteConfigSnapshot> {
+  const response = await fetch('/api/site-config', {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(
+      detail.trim()
+        ? `PUT /api/site-config failed with ${response.status}: ${detail}`
+        : `PUT /api/site-config failed with ${response.status}`,
+    );
   }
 
   return response.json();

@@ -8,6 +8,7 @@ mod ocpp_runtime;
 mod ocpp_v16;
 mod ocpp_v201;
 mod realtime;
+mod site_config;
 mod users;
 
 use app_state::ConnectionRegistry;

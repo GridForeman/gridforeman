@@ -3,6 +3,7 @@ import { AppFrame } from './components/AppFrame';
 import { AppModal } from './components/AppModal';
 import { BadgesPage } from './pages/BadgesPage';
 import { EventsPage } from './pages/EventsPage';
+import { SitePage } from './pages/SitePage';
 import { StationsPage } from './pages/StationsPage';
 import { TransactionsPage } from './pages/TransactionsPage';
 import { UsersPage } from './pages/UsersPage';
@@ -10,6 +11,7 @@ import { useAppState } from './hooks/useAppState';
 import type { AppRoute } from './appTypes';
 
 const routeTitles: Record<AppRoute, string> = {
+  '/site': 'Impianto',
   '/stations': 'Colonnine',
   '/users': 'Utenti',
   '/badges': 'Badge',
@@ -83,7 +85,11 @@ export default function App() {
         <Routes>
           <Route
             path="/"
-            element={<Navigate to="/stations" replace />}
+            element={<Navigate to="/site" replace />}
+          />
+          <Route
+            path="/site"
+            element={<SitePage stations={app.data.stations} />}
           />
           <Route
             path="/stations"
@@ -161,7 +167,7 @@ export default function App() {
               />
             )}
           />
-          <Route path="*" element={<Navigate to="/stations" replace />} />
+          <Route path="*" element={<Navigate to="/site" replace />} />
         </Routes>
       </AppFrame>
 
