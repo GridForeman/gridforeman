@@ -101,6 +101,7 @@ export function TransactionsPage({ stations, users, badges }: Props) {
   }, [badges, userFilter]);
 
   async function loadTransactions(keepVisible = true) {
+    if (loading || refreshing) return;
     if (!keepVisible) {
       setLoading(true);
     } else {
@@ -208,7 +209,6 @@ export function TransactionsPage({ stations, users, badges }: Props) {
             <button
               className="ghost-button toolbar-refresh-button"
               type="button"
-              disabled={loading || refreshing}
               onClick={() => void loadTransactions(true)}
             >
               Aggiorna

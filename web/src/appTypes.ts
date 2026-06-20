@@ -1,6 +1,6 @@
 import type { Badge, ConnectorSummary, SiteConfigSnapshot, StationSummary, User } from './api';
 
-export type AppRoute = '/site' | '/stations' | '/users' | '/badges' | '/events' | '/transactions';
+export type AppRoute = '/site' | '/energy-meters' | '/stations' | '/users' | '/badges' | '/events' | '/transactions';
 export type StationStatus = 'online' | 'offline' | 'error';
 export type BackendStatus = 'connecting' | 'connected' | 'reconnecting' | 'degraded';
 export type ModalKind =

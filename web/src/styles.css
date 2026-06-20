@@ -47,7 +47,11 @@ body {
     "Segoe UI",
     sans-serif;
   background:
-    radial-gradient(circle at top left, rgba(79, 140, 255, 0.08), transparent 26%),
+    radial-gradient(
+      circle at top left,
+      rgba(79, 140, 255, 0.08),
+      transparent 26%
+    ),
     linear-gradient(180deg, #0b1219 0%, #0d141d 48%, #0f1722 100%);
   color: var(--text);
   overflow: hidden;
@@ -88,6 +92,9 @@ button {
   display: grid;
   place-items: center;
   background: linear-gradient(145deg, var(--accent), var(--accent-strong));
+  background-image: url("./assets/logo.png");
+  background-size: contain;
+  background-position: 50% 50%;
   color: white;
   font-weight: 800;
   box-shadow: 0 10px 24px rgba(47, 111, 228, 0.24);
@@ -307,7 +314,9 @@ button {
 }
 
 .hero-card-large {
-  background: linear-gradient(180deg, rgba(79, 140, 255, 0.06), rgba(79, 140, 255, 0)), var(--panel);
+  background:
+    linear-gradient(180deg, rgba(79, 140, 255, 0.06), rgba(79, 140, 255, 0)),
+    var(--panel);
 }
 
 .hero-card-label {
@@ -583,7 +592,11 @@ th {
   border-radius: var(--radius-md);
   border: 1px solid rgba(144, 163, 198, 0.18);
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.02)),
+    linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.05),
+      rgba(255, 255, 255, 0.02)
+    ),
     rgba(7, 17, 31, 0.72);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
@@ -670,7 +683,7 @@ th {
 }
 
 .field-select-shell::after {
-  content: '▾';
+  content: "▾";
   position: absolute;
   right: 14px;
   top: 50%;

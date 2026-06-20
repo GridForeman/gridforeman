@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import { NavLink } from 'react-router-dom';
 import type { BackendStatus } from '../appTypes';
 import type { AppRoute } from '../appTypes';
+import logoImg from "../assets/logo.png";
 
 type Props = {
   title: string;
@@ -15,6 +16,7 @@ type Props = {
 
 const routes: Array<{ to: AppRoute; label: string }> = [
   { to: '/site', label: 'Impianto' },
+  { to: '/energy-meters', label: 'Misuratori' },
   { to: '/stations', label: 'Colonnine' },
   { to: '/users', label: 'Utenti' },
   { to: '/badges', label: 'Badge' },
@@ -42,7 +44,8 @@ export function AppFrame({
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-mark">GF</div>
+          <div className="brand-mark">
+          </div>
           <div>
             <div className="brand-title">Grid Foreman</div>
             <div className="brand-subtitle">Admin console</div>

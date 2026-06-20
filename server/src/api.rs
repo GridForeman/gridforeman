@@ -12,23 +12,27 @@ use crate::{
     db::ChargingTransaction,
     db::ConnectorSummary,
     db::Database,
+    db::EnergyMeter,
     db::StationLocation,
     db::StationSummary,
+    energy_meter_catalog::EnergyMeterCatalog,
     greptime::OcppEventRow,
     realtime::{self, RealtimeNotifier, RealtimeState},
-    site_config::SiteConfigSnapshot,
+    site_config::{SiteConfigSnapshot, SiteEnergyMeter},
     users::{NewUser, UserId},
 };
 
 #[derive(Clone)]
 pub struct ApiState {
     pub db: Database,
+    pub energy_meter_catalog: EnergyMeterCatalog,
     pub connections: ConnectionRegistry,
     pub notifier: RealtimeNotifier,
 }
 
 pub async fn run_api_server(
     db: Database,
+    energy_meter_catalog: EnergyMeterCatalog,
     connections: ConnectionRegistry,
     notifier: RealtimeNotifier,
 ) -> Result<(), std::io::Error> {
@@ -38,6 +42,7 @@ pub async fn run_api_server(
     };
     let state = ApiState {
         db,
+        energy_meter_catalog,
         connections,
         notifier,
     };
@@ -71,10 +76,13 @@ pub async fn run_api_server(
         .route("/api/badges", get(list_badges).post(create_badge))
         .route("/api/badges/{badge_id}", patch(update_badge))
         .route("/api/badges/{badge_id}/active", patch(set_badge_active))
+        .route("/api/energy-meters", get(list_energy_meters).post(create_energy_meter))
+        .route("/api/energy-meters/{meter_id}", patch(update_energy_meter).delete(delete_energy_meter))
         .route(
             "/api/site-config",
             get(get_site_config).put(update_site_config),
         )
+        .route("/api/energy-meter-catalog", get(get_energy_meter_catalog))
         .route("/api/events", get(list_events))
         .route("/api/transactions", get(list_transactions))
         .route(
@@ -474,6 +482,17 @@ async fn list_transactions(
         .map_err(internal_error)
 }
 
+async fn list_energy_meters(
+    State(state): State<ApiState>,
+) -> Result<Json<Vec<EnergyMeter>>, (StatusCode, String)> {
+    state
+        .db
+        .list_energy_meters()
+        .await
+        .map(Json)
+        .map_err(internal_error)
+}
+
 async fn get_site_config(
     State(state): State<ApiState>,
 ) -> Result<Json<SiteConfigSnapshot>, (StatusCode, String)> {
@@ -483,6 +502,12 @@ async fn get_site_config(
         .await
         .map(Json)
         .map_err(internal_error)
+}
+
+async fn get_energy_meter_catalog(
+    State(state): State<ApiState>,
+) -> Result<Json<EnergyMeterCatalog>, (StatusCode, String)> {
+    Ok(Json(state.energy_meter_catalog))
 }
 
 async fn update_site_config(
@@ -495,6 +520,46 @@ async fn update_site_config(
         .await
         .map(Json)
         .map_err(internal_error)
+}
+
+async fn create_energy_meter(
+    State(state): State<ApiState>,
+    Json(payload): Json<SiteEnergyMeter>,
+) -> Result<Json<EnergyMeter>, (StatusCode, String)> {
+    state
+        .db
+        .create_energy_meter(payload)
+        .await
+        .map(Json)
+        .map_err(internal_error)
+}
+
+async fn update_energy_meter(
+    State(state): State<ApiState>,
+    Path(meter_id): Path<String>,
+    Json(payload): Json<SiteEnergyMeter>,
+) -> Result<Json<EnergyMeter>, (StatusCode, String)> {
+    match state
+        .db
+        .update_energy_meter(&meter_id, payload)
+        .await
+        .map_err(internal_error)?
+    {
+        Some(meter) => Ok(Json(meter)),
+        None => Err((StatusCode::NOT_FOUND, "energy meter not found".to_string())),
+    }
+}
+
+async fn delete_energy_meter(
+    State(state): State<ApiState>,
+    Path(meter_id): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    state
+        .db
+        .delete_energy_meter(&meter_id)
+        .await
+        .map_err(internal_error)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Debug, Deserialize)]

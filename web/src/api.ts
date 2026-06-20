@@ -40,19 +40,29 @@ export type RealtimeStateSnapshot = {
   connectors: ConnectorSummary[];
 };
 
-export type SitePowerFeed = {
+export type SiteEnergyMeter = {
   id: string;
   name: string;
+  catalog_key: string | null;
+  host: string | null;
+  port: number | null;
+  unit_id: number | null;
+  poll_interval_ms: number | null;
   meter_label: string | null;
   max_current_a: number | null;
   notes: string | null;
+};
+
+export type EnergyMeter = SiteEnergyMeter & {
+  created_at: string;
+  updated_at: string;
 };
 
 export type SiteManagementGroup = {
   id: string;
   name: string;
   control_mode: string;
-  power_feed_ids: string[];
+  energy_meter_ids: string[];
   station_ids: string[];
   notes: string | null;
 };
@@ -62,9 +72,34 @@ export type SiteConfigSnapshot = {
   timezone: string;
   operator_name: string | null;
   notes: string | null;
-  power_feeds: SitePowerFeed[];
+  energy_meters: SiteEnergyMeter[];
   management_groups: SiteManagementGroup[];
   updated_at: string | null;
+};
+
+export type EnergyMeterCatalogRegister = {
+  metric_key: string;
+  address: number;
+  length: number;
+  function: string;
+  data_type: string;
+  endianness: string;
+  scale: number;
+  unit: string;
+};
+
+export type EnergyMeterCatalogProfile = {
+  key: string;
+  vendor: string;
+  model: string;
+  transport: string;
+  default_port: number;
+  registers: EnergyMeterCatalogRegister[];
+  notes: string | null;
+};
+
+export type EnergyMeterCatalog = {
+  profiles: EnergyMeterCatalogProfile[];
 };
 
 export async function fetchStations(): Promise<StationSummary[]> {
@@ -109,6 +144,81 @@ export async function fetchSiteConfig(): Promise<SiteConfigSnapshot> {
   }
 
   return response.json();
+}
+
+export async function fetchEnergyMeterCatalog(): Promise<EnergyMeterCatalog> {
+  const response = await fetch('/api/energy-meter-catalog', { cache: 'no-store' });
+  if (!response.ok) {
+    throw new Error(`GET /api/energy-meter-catalog failed with ${response.status}`);
+  }
+
+  return response.json();
+}
+
+export async function fetchEnergyMeters(): Promise<EnergyMeter[]> {
+  const response = await fetch('/api/energy-meters', { cache: 'no-store' });
+  if (!response.ok) {
+    throw new Error(`GET /api/energy-meters failed with ${response.status}`);
+  }
+
+  return response.json();
+}
+
+export async function createEnergyMeter(payload: SiteEnergyMeter): Promise<EnergyMeter> {
+  const response = await fetch('/api/energy-meters', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(
+      detail.trim()
+        ? `POST /api/energy-meters failed with ${response.status}: ${detail}`
+        : `POST /api/energy-meters failed with ${response.status}`,
+    );
+  }
+
+  return response.json();
+}
+
+export async function updateEnergyMeterRecord(meterId: string, payload: SiteEnergyMeter): Promise<EnergyMeter> {
+  const response = await fetch(`/api/energy-meters/${meterId}`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(
+      detail.trim()
+        ? `PATCH /api/energy-meters/${meterId} failed with ${response.status}: ${detail}`
+        : `PATCH /api/energy-meters/${meterId} failed with ${response.status}`,
+    );
+  }
+
+  return response.json();
+}
+
+export async function deleteEnergyMeter(meterId: string): Promise<void> {
+  const response = await fetch(`/api/energy-meters/${meterId}`, {
+    method: 'DELETE',
+  });
+
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(
+      detail.trim()
+        ? `DELETE /api/energy-meters/${meterId} failed with ${response.status}: ${detail}`
+        : `DELETE /api/energy-meters/${meterId} failed with ${response.status}`,
+    );
+  }
 }
 
 export async function updateSiteConfig(payload: SiteConfigSnapshot): Promise<SiteConfigSnapshot> {

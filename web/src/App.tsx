@@ -2,6 +2,7 @@ import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-
 import { AppFrame } from './components/AppFrame';
 import { AppModal } from './components/AppModal';
 import { BadgesPage } from './pages/BadgesPage';
+import { EnergyMetersPage } from './pages/EnergyMetersPage';
 import { EventsPage } from './pages/EventsPage';
 import { SitePage } from './pages/SitePage';
 import { StationsPage } from './pages/StationsPage';
@@ -12,6 +13,7 @@ import type { AppRoute } from './appTypes';
 
 const routeTitles: Record<AppRoute, string> = {
   '/site': 'Impianto',
+  '/energy-meters': 'Misuratori',
   '/stations': 'Colonnine',
   '/users': 'Utenti',
   '/badges': 'Badge',
@@ -90,6 +92,10 @@ export default function App() {
           <Route
             path="/site"
             element={<SitePage stations={app.data.stations} />}
+          />
+          <Route
+            path="/energy-meters"
+            element={<EnergyMetersPage />}
           />
           <Route
             path="/stations"

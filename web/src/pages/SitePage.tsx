@@ -4,7 +4,6 @@ import {
   updateSiteConfig,
   type SiteConfigSnapshot,
   type SiteManagementGroup,
-  type SitePowerFeed,
   type StationSummary,
 } from '../api';
 
@@ -12,22 +11,15 @@ type Props = {
   stations: StationSummary[];
 };
 
-function newFeed(): SitePowerFeed {
-  return {
-    id: crypto.randomUUID(),
-    name: '',
-    meter_label: null,
-    max_current_a: null,
-    notes: null,
-  };
-}
-
 function newGroup(): SiteManagementGroup {
   return {
-    id: crypto.randomUUID(),
+    id:
+      globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function'
+        ? globalThis.crypto.randomUUID()
+        : `group-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
     name: '',
     control_mode: 'load-sharing',
-    power_feed_ids: [],
+    energy_meter_ids: [],
     station_ids: [],
     notes: null,
   };
@@ -39,17 +31,10 @@ function defaultConfig(): SiteConfigSnapshot {
     timezone: 'Europe/Zurich',
     operator_name: null,
     notes: null,
-    power_feeds: [],
+    energy_meters: [],
     management_groups: [],
     updated_at: null,
   };
-}
-
-function parseNumberOrNull(value: string): number | null {
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  const parsed = Number(trimmed);
-  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function normalizeInput(value: string): string | null {
@@ -101,13 +86,6 @@ export function SitePage({ stations }: Props) {
     [config.management_groups],
   );
 
-  function updateFeed(feedId: string, patch: Partial<SitePowerFeed>) {
-    setConfig((current) => ({
-      ...current,
-      power_feeds: current.power_feeds.map((feed) => (feed.id === feedId ? { ...feed, ...patch } : feed)),
-    }));
-  }
-
   function updateGroup(groupId: string, patch: Partial<SiteManagementGroup>) {
     setConfig((current) => ({
       ...current,
@@ -115,17 +93,17 @@ export function SitePage({ stations }: Props) {
     }));
   }
 
-  function toggleGroupFeed(groupId: string, feedId: string) {
+  function toggleGroupEnergyMeter(groupId: string, meterId: string) {
     setConfig((current) => ({
       ...current,
       management_groups: current.management_groups.map((group) => {
         if (group.id !== groupId) return group;
-        const exists = group.power_feed_ids.includes(feedId);
+        const exists = group.energy_meter_ids.includes(meterId);
         return {
           ...group,
-          power_feed_ids: exists
-            ? group.power_feed_ids.filter((value) => value !== feedId)
-            : [...group.power_feed_ids, feedId],
+          energy_meter_ids: exists
+            ? group.energy_meter_ids.filter((value) => value !== meterId)
+            : [...group.energy_meter_ids, meterId],
         };
       }),
     }));
@@ -157,12 +135,6 @@ export function SitePage({ stations }: Props) {
         timezone: config.timezone,
         operator_name: normalizeInput(config.operator_name ?? ''),
         notes: normalizeInput(config.notes ?? ''),
-        power_feeds: config.power_feeds.map((feed) => ({
-          ...feed,
-          name: feed.name,
-          meter_label: normalizeInput(feed.meter_label ?? ''),
-          notes: normalizeInput(feed.notes ?? ''),
-        })),
         management_groups: config.management_groups.map((group) => ({
           ...group,
           name: group.name,
@@ -187,8 +159,8 @@ export function SitePage({ stations }: Props) {
           <p>Configura topologia locale senza assumere un solo gruppo di gestione per impianto.</p>
           <div className="hero-metrics">
             <div>
-              <span>Feed potenza</span>
-              <strong>{config.power_feeds.length}</strong>
+              <span>Misuratori energia</span>
+              <strong>{config.energy_meters.length}</strong>
             </div>
             <div>
               <span>Gruppi gestione</span>
@@ -261,7 +233,7 @@ export function SitePage({ stations }: Props) {
                 </label>
                 <div className="field">
                   <span>Modello</span>
-                  <input value="Feed multipli + gruppi multipli" readOnly />
+                  <input value="Misuratori energia multipli + gruppi multipli" readOnly />
                 </div>
               </div>
 
@@ -278,98 +250,13 @@ export function SitePage({ stations }: Props) {
           )}
         </article>
 
-        <aside className="panel panel-side">
-          <div className="panel-header">
-            <div>
-              <h2>Feed di potenza</h2>
-              <p>Entrate aziendali, linee o sorgenti da cui derivare limiti disponibili.</p>
-            </div>
-            <button
-              className="ghost-button"
-              type="button"
-              onClick={() => setConfig((current) => ({ ...current, power_feeds: [...current.power_feeds, newFeed()] }))}
-              disabled={loading || saving}
-            >
-              Nuovo feed
-            </button>
-          </div>
-
-          {config.power_feeds.length === 0 ? (
-            <div className="empty-state">Nessun feed definito.</div>
-          ) : (
-            config.power_feeds.map((feed, index) => (
-              <div key={feed.id} className="detail-card site-config-card">
-                <div className="panel-header">
-                  <div>
-                    <div className="detail-title">Feed {index + 1}</div>
-                    <div className="detail-subtitle">{feed.id}</div>
-                  </div>
-                  <button
-                    className="ghost-button small-button button-danger"
-                    type="button"
-                    onClick={() => setConfig((current) => ({
-                      ...current,
-                      power_feeds: current.power_feeds.filter((candidate) => candidate.id !== feed.id),
-                      management_groups: current.management_groups.map((group) => ({
-                        ...group,
-                        power_feed_ids: group.power_feed_ids.filter((value) => value !== feed.id),
-                      })),
-                    }))}
-                    disabled={saving}
-                  >
-                    Rimuovi
-                  </button>
-                </div>
-
-                <div className="stack-form">
-                  <div className="field-grid">
-                    <label className="field">
-                      <span>Codice feed</span>
-                      <input value={feed.id} onChange={(event) => updateFeed(feed.id, { id: event.target.value })} />
-                    </label>
-                    <label className="field">
-                      <span>Nome</span>
-                      <input value={feed.name} onChange={(event) => updateFeed(feed.id, { name: event.target.value })} />
-                    </label>
-                  </div>
-                  <div className="field-grid">
-                    <label className="field">
-                      <span>Meter label</span>
-                      <input
-                        value={feed.meter_label ?? ''}
-                        onChange={(event) => updateFeed(feed.id, { meter_label: event.target.value })}
-                        placeholder="contatore_qg_nord"
-                      />
-                    </label>
-                    <label className="field">
-                      <span>Corrente max A</span>
-                      <input
-                        value={feed.max_current_a ?? ''}
-                        onChange={(event) => updateFeed(feed.id, { max_current_a: parseNumberOrNull(event.target.value) })}
-                        placeholder="250"
-                      />
-                    </label>
-                  </div>
-                  <label className="field">
-                    <span>Note</span>
-                    <textarea
-                      rows={3}
-                      value={feed.notes ?? ''}
-                      onChange={(event) => updateFeed(feed.id, { notes: event.target.value })}
-                    />
-                  </label>
-                </div>
-              </div>
-            ))
-          )}
-        </aside>
       </section>
 
       <section className="panel">
         <div className="panel-header">
           <div>
             <h2>Gruppi di gestione</h2>
-            <p>Ogni gruppo può usare più feed e governare più colonnine. Nessun vincolo a gruppo unico per impianto.</p>
+            <p>Ogni gruppo può usare più misuratori energia e governare più colonnine. Nessun vincolo a gruppo unico per impianto.</p>
           </div>
           <button
             className="ghost-button"
@@ -436,18 +323,18 @@ export function SitePage({ stations }: Props) {
                   </label>
 
                   <div className="site-config-checklist">
-                    <div className="site-config-checklist-title">Feed associati</div>
-                    {config.power_feeds.length === 0 ? (
-                      <div className="empty-state">Prima definisci almeno un feed.</div>
+                    <div className="site-config-checklist-title">Misuratori energia associati</div>
+                    {config.energy_meters.length === 0 ? (
+                      <div className="empty-state">Prima definisci almeno un misuratore energia.</div>
                     ) : (
-                      config.power_feeds.map((feed) => (
-                        <label key={feed.id} className="site-config-check">
+                      config.energy_meters.map((meter) => (
+                        <label key={meter.id} className="site-config-check">
                           <input
                             type="checkbox"
-                            checked={group.power_feed_ids.includes(feed.id)}
-                            onChange={() => toggleGroupFeed(group.id, feed.id)}
+                            checked={group.energy_meter_ids.includes(meter.id)}
+                            onChange={() => toggleGroupEnergyMeter(group.id, meter.id)}
                           />
-                          <span>{feed.name.trim() || feed.id}</span>
+                          <span>{meter.name.trim() || meter.id}</span>
                         </label>
                       ))
                     )}

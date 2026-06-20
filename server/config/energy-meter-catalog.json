@@ -1,0 +1,94 @@
+{
+  "profiles": [
+    {
+      "key": "generic_modbus_3phase_v1",
+      "vendor": "Generic",
+      "model": "3-Phase Meter",
+      "transport": "modbus_tcp",
+      "default_port": 502,
+      "notes": "Profilo generico di base per misure trifase via Modbus TCP.",
+      "registers": [
+        {
+          "metric_key": "voltage_l1_v",
+          "address": 0,
+          "length": 2,
+          "function": "holding",
+          "data_type": "f32",
+          "endianness": "big-big",
+          "scale": 1.0,
+          "unit": "V"
+        },
+        {
+          "metric_key": "voltage_l2_v",
+          "address": 2,
+          "length": 2,
+          "function": "holding",
+          "data_type": "f32",
+          "endianness": "big-big",
+          "scale": 1.0,
+          "unit": "V"
+        },
+        {
+          "metric_key": "voltage_l3_v",
+          "address": 4,
+          "length": 2,
+          "function": "holding",
+          "data_type": "f32",
+          "endianness": "big-big",
+          "scale": 1.0,
+          "unit": "V"
+        },
+        {
+          "metric_key": "current_l1_a",
+          "address": 6,
+          "length": 2,
+          "function": "holding",
+          "data_type": "f32",
+          "endianness": "big-big",
+          "scale": 1.0,
+          "unit": "A"
+        },
+        {
+          "metric_key": "current_l2_a",
+          "address": 8,
+          "length": 2,
+          "function": "holding",
+          "data_type": "f32",
+          "endianness": "big-big",
+          "scale": 1.0,
+          "unit": "A"
+        },
+        {
+          "metric_key": "current_l3_a",
+          "address": 10,
+          "length": 2,
+          "function": "holding",
+          "data_type": "f32",
+          "endianness": "big-big",
+          "scale": 1.0,
+          "unit": "A"
+        },
+        {
+          "metric_key": "active_power_total_w",
+          "address": 12,
+          "length": 2,
+          "function": "holding",
+          "data_type": "f32",
+          "endianness": "big-big",
+          "scale": 1.0,
+          "unit": "W"
+        },
+        {
+          "metric_key": "import_energy_total_wh",
+          "address": 14,
+          "length": 2,
+          "function": "holding",
+          "data_type": "f32",
+          "endianness": "big-big",
+          "scale": 1000.0,
+          "unit": "Wh"
+        }
+      ]
+    }
+  ]
+}

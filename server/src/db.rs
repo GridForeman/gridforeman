@@ -7,7 +7,7 @@ use tokio_postgres::{Client, Error, NoTls};
 
 use crate::badges::{Badge, BadgeId, NewBadge};
 use crate::greptime::{ChargingMeasurementRecord, GreptimeWriter, OcppMessageRecord};
-use crate::site_config::{SiteConfigSnapshot, SiteConfigTopology};
+use crate::site_config::{SiteConfigSnapshot, SiteConfigTopology, SiteEnergyMeter};
 use crate::users::{NewUser, User, UserId};
 
 #[derive(Clone)]
@@ -85,6 +85,22 @@ pub struct ChargingTransaction {
     pub last_meter_wh: Option<i64>,
     pub energy_wh: Option<i64>,
     pub stop_reason: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EnergyMeter {
+    pub id: String,
+    pub name: String,
+    pub catalog_key: Option<String>,
+    pub host: Option<String>,
+    pub port: Option<i32>,
+    pub unit_id: Option<i32>,
+    pub poll_interval_ms: Option<i64>,
+    pub meter_label: Option<String>,
+    pub max_current_a: Option<f64>,
+    pub notes: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -188,6 +204,42 @@ impl Database {
                     created_at TIMESTAMPTZ NOT NULL,
                     updated_at TIMESTAMPTZ NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS energy_meters (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    catalog_key TEXT,
+                    host TEXT,
+                    port INTEGER,
+                    unit_id INTEGER,
+                    poll_interval_ms BIGINT,
+                    meter_label TEXT,
+                    max_current_a DOUBLE PRECISION,
+                    notes TEXT,
+                    created_at TIMESTAMPTZ NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL
+                );
+
+                ALTER TABLE energy_meters
+                    ADD COLUMN IF NOT EXISTS catalog_key TEXT;
+                ALTER TABLE energy_meters
+                    ADD COLUMN IF NOT EXISTS host TEXT;
+                ALTER TABLE energy_meters
+                    ADD COLUMN IF NOT EXISTS port INTEGER;
+                ALTER TABLE energy_meters
+                    ADD COLUMN IF NOT EXISTS unit_id INTEGER;
+                ALTER TABLE energy_meters
+                    ADD COLUMN IF NOT EXISTS poll_interval_ms BIGINT;
+                ALTER TABLE energy_meters
+                    ADD COLUMN IF NOT EXISTS meter_label TEXT;
+                ALTER TABLE energy_meters
+                    ADD COLUMN IF NOT EXISTS max_current_a DOUBLE PRECISION;
+                ALTER TABLE energy_meters
+                    ADD COLUMN IF NOT EXISTS notes TEXT;
+                ALTER TABLE energy_meters
+                    ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+                ALTER TABLE energy_meters
+                    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 
                 ALTER TABLE badges
                     ALTER COLUMN user_id DROP NOT NULL;
@@ -299,7 +351,7 @@ impl Database {
                     timezone TEXT NOT NULL DEFAULT 'Europe/Zurich',
                     operator_name TEXT,
                     notes TEXT,
-                    topology JSONB NOT NULL DEFAULT '{"power_feeds":[],"management_groups":[]}'::JSONB,
+                    topology JSONB NOT NULL DEFAULT '{"energy_meters":[],"management_groups":[]}'::JSONB,
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
 
@@ -312,7 +364,7 @@ impl Database {
                 ALTER TABLE site_settings
                     ADD COLUMN IF NOT EXISTS notes TEXT;
                 ALTER TABLE site_settings
-                    ADD COLUMN IF NOT EXISTS topology JSONB NOT NULL DEFAULT '{"power_feeds":[],"management_groups":[]}'::JSONB;
+                    ADD COLUMN IF NOT EXISTS topology JSONB NOT NULL DEFAULT '{"energy_meters":[],"management_groups":[]}'::JSONB;
                 ALTER TABLE site_settings
                     ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
                 "#,
@@ -981,13 +1033,14 @@ impl Database {
 
         let topology_text: String = row.get("topology");
         let topology: SiteConfigTopology = serde_json::from_str(&topology_text)?;
+        let energy_meters = self.list_energy_meters().await?;
 
         Ok(SiteConfigSnapshot {
             site_name: row.get("site_name"),
             timezone: row.get("timezone"),
             operator_name: row.get("operator_name"),
             notes: row.get("notes"),
-            power_feeds: topology.power_feeds,
+            energy_meters: energy_meters.iter().map(site_energy_meter_from_db).collect(),
             management_groups: topology.management_groups,
             updated_at: row.get("updated_at"),
         })
@@ -997,10 +1050,20 @@ impl Database {
         &self,
         mut snapshot: SiteConfigSnapshot,
     ) -> Result<SiteConfigSnapshot, Box<dyn std::error::Error + Send + Sync>> {
-        normalize_and_validate_site_config(&mut snapshot, &self.list_stations().await?)?;
+        let energy_meter_ids = self
+            .list_energy_meters()
+            .await?
+            .into_iter()
+            .map(|meter| meter.id)
+            .collect::<Vec<_>>();
+        normalize_and_validate_site_config(
+            &mut snapshot,
+            &self.list_stations().await?,
+            &energy_meter_ids,
+        )?;
 
         let topology = SiteConfigTopology {
-            power_feeds: snapshot.power_feeds.clone(),
+            energy_meters: Vec::new(),
             management_groups: snapshot.management_groups.clone(),
         };
         let topology_json = serde_json::to_string(&topology)?;
@@ -1039,7 +1102,189 @@ impl Database {
             .await?;
 
         snapshot.updated_at = Some(now);
+        snapshot.energy_meters = self
+            .list_energy_meters()
+            .await?
+            .iter()
+            .map(site_energy_meter_from_db)
+            .collect();
         Ok(snapshot)
+    }
+
+    pub async fn create_energy_meter(
+        &self,
+        mut meter: SiteEnergyMeter,
+    ) -> Result<EnergyMeter, Box<dyn std::error::Error + Send + Sync>> {
+        normalize_energy_meter(&mut meter)?;
+        let now = Utc::now();
+        let row = self
+            .client
+            .query_one(
+                r#"
+                INSERT INTO energy_meters (
+                    id,
+                    name,
+                    catalog_key,
+                    host,
+                    port,
+                    unit_id,
+                    poll_interval_ms,
+                    meter_label,
+                    max_current_a,
+                    notes,
+                    created_at,
+                    updated_at
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11)
+                RETURNING id, name, catalog_key, host, port, unit_id, poll_interval_ms, meter_label, max_current_a, notes, created_at, updated_at
+                "#,
+                &[
+                    &meter.id,
+                    &meter.name,
+                    &meter.catalog_key,
+                    &meter.host,
+                    &meter.port.map(|value| value as i32),
+                    &meter.unit_id.map(|value| value as i32),
+                    &meter.poll_interval_ms.map(|value| value as i64),
+                    &meter.meter_label,
+                    &meter.max_current_a,
+                    &meter.notes,
+                    &now,
+                ],
+            )
+            .await?;
+        Ok(row_to_energy_meter(&row))
+    }
+
+    pub async fn list_energy_meters(&self) -> Result<Vec<EnergyMeter>, Error> {
+        let rows = self
+            .client
+            .query(
+                r#"
+                SELECT id, name, catalog_key, host, port, unit_id, poll_interval_ms, meter_label, max_current_a, notes, created_at, updated_at
+                FROM energy_meters
+                ORDER BY id
+                "#,
+                &[],
+            )
+            .await?;
+        Ok(rows.iter().map(row_to_energy_meter).collect())
+    }
+
+    pub async fn update_energy_meter(
+        &self,
+        meter_id: &str,
+        mut meter: SiteEnergyMeter,
+    ) -> Result<Option<EnergyMeter>, Box<dyn std::error::Error + Send + Sync>> {
+        normalize_energy_meter(&mut meter)?;
+        let now = Utc::now();
+        let row = self
+            .client
+            .query_opt(
+                r#"
+                UPDATE energy_meters
+                SET id = $2,
+                    name = $3,
+                    catalog_key = $4,
+                    host = $5,
+                    port = $6,
+                    unit_id = $7,
+                    poll_interval_ms = $8,
+                    meter_label = $9,
+                    max_current_a = $10,
+                    notes = $11,
+                    updated_at = $12
+                WHERE id = $1
+                RETURNING id, name, catalog_key, host, port, unit_id, poll_interval_ms, meter_label, max_current_a, notes, created_at, updated_at
+                "#,
+                &[
+                    &meter_id,
+                    &meter.id,
+                    &meter.name,
+                    &meter.catalog_key,
+                    &meter.host,
+                    &meter.port.map(|value| value as i32),
+                    &meter.unit_id.map(|value| value as i32),
+                    &meter.poll_interval_ms.map(|value| value as i64),
+                    &meter.meter_label,
+                    &meter.max_current_a,
+                    &meter.notes,
+                    &now,
+                ],
+            )
+            .await?;
+        if meter_id != meter.id {
+            self.sync_site_config_energy_meter_reference(meter_id, Some(&meter.id))
+                .await?;
+        }
+        Ok(row.map(|row| row_to_energy_meter(&row)))
+    }
+
+    pub async fn delete_energy_meter(
+        &self,
+        meter_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.client
+            .execute("DELETE FROM energy_meters WHERE id = $1", &[&meter_id])
+            .await?;
+        self.sync_site_config_energy_meter_reference(meter_id, None)
+            .await?;
+        Ok(())
+    }
+
+    async fn sync_site_config_energy_meter_reference(
+        &self,
+        old_meter_id: &str,
+        new_meter_id: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let row = self
+            .client
+            .query_opt(
+                r#"
+                SELECT topology::TEXT AS topology
+                FROM site_settings
+                WHERE site_key = 'default'
+                "#,
+                &[],
+            )
+            .await?;
+
+        let Some(row) = row else {
+            return Ok(());
+        };
+
+        let topology_text: String = row.get("topology");
+        let mut topology: SiteConfigTopology = serde_json::from_str(&topology_text)?;
+
+        for group in &mut topology.management_groups {
+            let mut next_ids = Vec::with_capacity(group.energy_meter_ids.len());
+            for meter_id in &group.energy_meter_ids {
+                if meter_id == old_meter_id {
+                    if let Some(new_id) = new_meter_id {
+                        if !next_ids.iter().any(|value| value == new_id) {
+                            next_ids.push(new_id.to_string());
+                        }
+                    }
+                } else if !next_ids.iter().any(|value| value == meter_id) {
+                    next_ids.push(meter_id.clone());
+                }
+            }
+            group.energy_meter_ids = next_ids;
+        }
+
+        let topology_json = serde_json::to_string(&topology)?;
+        self.client
+            .execute(
+                r#"
+                UPDATE site_settings
+                SET topology = $1::TEXT::JSONB,
+                    updated_at = $2
+                WHERE site_key = 'default'
+                "#,
+                &[&topology_json, &Utc::now()],
+            )
+            .await?;
+        Ok(())
     }
 
     pub async fn create_user(&self, user: NewUser) -> Result<User, Error> {
@@ -1624,9 +1869,55 @@ fn normalize_required_text(value: &mut String, field: &str) -> Result<(), std::i
     Ok(())
 }
 
+fn normalize_energy_meter(meter: &mut SiteEnergyMeter) -> Result<(), std::io::Error> {
+    normalize_required_text(&mut meter.id, "id misuratore energia")?;
+    normalize_required_text(&mut meter.name, "nome misuratore energia")?;
+    normalize_optional_text(&mut meter.catalog_key);
+    normalize_optional_text(&mut meter.host);
+    normalize_optional_text(&mut meter.meter_label);
+    normalize_optional_text(&mut meter.notes);
+    if let Some(port) = meter.port
+        && port == 0
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("misuratore energia {} ha porta Modbus non valida", meter.name),
+        ));
+    }
+    if let Some(unit_id) = meter.unit_id
+        && unit_id == 0
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("misuratore energia {} ha unit id non valido", meter.name),
+        ));
+    }
+    if let Some(poll_interval_ms) = meter.poll_interval_ms
+        && poll_interval_ms == 0
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "misuratore energia {} ha poll_interval_ms non valido",
+                meter.name
+            ),
+        ));
+    }
+    if let Some(max_current_a) = meter.max_current_a
+        && max_current_a <= 0.0
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("misuratore energia {} ha max_current_a non valido", meter.name),
+        ));
+    }
+    Ok(())
+}
+
 fn normalize_and_validate_site_config(
     snapshot: &mut SiteConfigSnapshot,
     stations: &[StationSummary],
+    energy_meter_ids: &[String],
 ) -> Result<(), std::io::Error> {
     use std::collections::HashSet;
 
@@ -1634,28 +1925,7 @@ fn normalize_and_validate_site_config(
     normalize_optional_text(&mut snapshot.operator_name);
     normalize_optional_text(&mut snapshot.notes);
     normalize_required_text(&mut snapshot.timezone, "timezone")?;
-
-    let mut feed_ids = HashSet::new();
-    for feed in &mut snapshot.power_feeds {
-        normalize_required_text(&mut feed.id, "id feed")?;
-        normalize_required_text(&mut feed.name, "nome feed")?;
-        normalize_optional_text(&mut feed.meter_label);
-        normalize_optional_text(&mut feed.notes);
-        if let Some(max_current_a) = feed.max_current_a
-            && max_current_a <= 0.0
-        {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("feed {} ha max_current_a non valido", feed.name),
-            ));
-        }
-        if !feed_ids.insert(feed.id.clone()) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("feed duplicato: {}", feed.id),
-            ));
-        }
-    }
+    let feed_ids = energy_meter_ids.iter().cloned().collect::<HashSet<_>>();
 
     let station_ids = stations
         .iter()
@@ -1677,21 +1947,24 @@ fn normalize_and_validate_site_config(
         }
 
         let mut dedup_feed_ids = HashSet::new();
-        group.power_feed_ids.retain(|feed_id| {
-            let trimmed = feed_id.trim();
+        group.energy_meter_ids.retain(|meter_id| {
+            let trimmed = meter_id.trim();
             !trimmed.is_empty() && dedup_feed_ids.insert(trimmed.to_string())
         });
-        group.power_feed_ids = group
-            .power_feed_ids
+        group.energy_meter_ids = group
+            .energy_meter_ids
             .iter()
-            .map(|feed_id| feed_id.trim().to_string())
+            .map(|meter_id| meter_id.trim().to_string())
             .collect();
 
-        for feed_id in &group.power_feed_ids {
-            if !feed_ids.contains(feed_id) {
+        for meter_id in &group.energy_meter_ids {
+            if !feed_ids.contains(meter_id) {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    format!("gruppo {} referenzia feed inesistente {}", group.name, feed_id),
+                    format!(
+                        "gruppo {} referenzia misuratore energia inesistente {}",
+                        group.name, meter_id
+                    ),
                 ));
             }
         }
@@ -1721,4 +1994,36 @@ fn normalize_and_validate_site_config(
     }
 
     Ok(())
+}
+
+fn row_to_energy_meter(row: &Row) -> EnergyMeter {
+    EnergyMeter {
+        id: row.get("id"),
+        name: row.get("name"),
+        catalog_key: row.get("catalog_key"),
+        host: row.get("host"),
+        port: row.get("port"),
+        unit_id: row.get("unit_id"),
+        poll_interval_ms: row.get("poll_interval_ms"),
+        meter_label: row.get("meter_label"),
+        max_current_a: row.get("max_current_a"),
+        notes: row.get("notes"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+fn site_energy_meter_from_db(meter: &EnergyMeter) -> SiteEnergyMeter {
+    SiteEnergyMeter {
+        id: meter.id.clone(),
+        name: meter.name.clone(),
+        catalog_key: meter.catalog_key.clone(),
+        host: meter.host.clone(),
+        port: meter.port.and_then(|value| u16::try_from(value).ok()),
+        unit_id: meter.unit_id.and_then(|value| u8::try_from(value).ok()),
+        poll_interval_ms: meter.poll_interval_ms.and_then(|value| u64::try_from(value).ok()),
+        meter_label: meter.meter_label.clone(),
+        max_current_a: meter.max_current_a,
+        notes: meter.notes.clone(),
+    }
 }
