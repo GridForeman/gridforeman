@@ -181,12 +181,14 @@ export default function App() {
         modalKind={app.modalKind}
         selectedStation={app.selectedStation}
         selectedStationConnectors={app.selectedStationConnectors}
+        stationConfiguration={app.data.stationConfiguration}
         saving={app.saving}
         stationCommandBusy={app.stationCommandBusy}
         formError={app.formError}
         loadingStationConnectors={app.data.loadingStationConnectors}
         stationConnectorsError={app.data.stationConnectorsError}
         users={app.users}
+        badges={app.data.badges}
         userDraft={app.userDraft}
         badgeDraft={app.badgeDraft}
         stationDraft={app.stationDraft}
@@ -194,6 +196,10 @@ export default function App() {
         handleSave={app.handleSave}
         refreshStationStatus={app.refreshStationStatus}
         toggleStationBlocked={app.toggleStationBlocked}
+        fetchStationConfiguration={app.fetchStationConfiguration}
+        remoteStartStationConnector={app.remoteStartStationConnector}
+        remoteStopStationConnector={app.remoteStopStationConnector}
+        setConnectorAutoRemoteStartBadge={app.setConnectorAutoRemoteStartBadge}
         toggleStationConnectorActive={app.toggleStationConnectorActive}
         unlockStationConnector={app.unlockStationConnector}
         setUserDraft={app.setUserDraft}

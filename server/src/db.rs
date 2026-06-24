@@ -6,7 +6,10 @@ use tokio_postgres::Row;
 use tokio_postgres::{Client, Error, NoTls};
 
 use crate::badges::{Badge, BadgeId, NewBadge};
-use crate::greptime::{ChargingMeasurementRecord, GreptimeWriter, OcppMessageRecord};
+use crate::greptime::{
+    ChargingMeasurementRecord, EnergyMeterMeasurementRecord, EnergyMeterMeasurementRow,
+    GreptimeWriter, OcppMessageRecord,
+};
 use crate::site_config::{SiteConfigSnapshot, SiteConfigTopology, SiteEnergyMeter};
 use crate::users::{NewUser, User, UserId};
 
@@ -57,6 +60,7 @@ pub struct ConnectorSummary {
     pub connector_id: i32,
     pub evse_id: Option<i32>,
     pub active: bool,
+    pub auto_remote_start_badge_code: Option<String>,
     pub current_status: Option<String>,
     pub current_error_code: Option<String>,
     pub current_status_at: Option<DateTime<Utc>>,
@@ -103,6 +107,57 @@ pub struct EnergyMeter {
     pub notes: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EnergyMeterRuntimeStatus {
+    pub meter_id: String,
+    pub is_online: bool,
+    pub last_attempt_at: DateTime<Utc>,
+    pub last_ok_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+    pub consecutive_failures: i32,
+    pub last_poll_duration_ms: Option<i64>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EnergyMeterLatestReading {
+    pub meter_id: String,
+    pub metric_key: String,
+    pub unit: Option<String>,
+    pub value_text: String,
+    pub value_num: Option<f64>,
+    pub measured_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EnergyMeterStatusView {
+    pub meter_id: String,
+    pub runtime: Option<EnergyMeterRuntimeStatus>,
+    pub latest_readings: Vec<EnergyMeterLatestReading>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnergyMeterRuntimeStatusUpdate {
+    pub meter_id: String,
+    pub is_online: bool,
+    pub last_attempt_at: DateTime<Utc>,
+    pub last_ok_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+    pub consecutive_failures: i32,
+    pub last_poll_duration_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnergyMeterLatestReadingUpsert {
+    pub meter_id: String,
+    pub metric_key: String,
+    pub unit: Option<String>,
+    pub value_text: String,
+    pub value_num: Option<f64>,
+    pub measured_at: DateTime<Utc>,
 }
 
 impl Database {
@@ -241,6 +296,54 @@ impl Database {
                 ALTER TABLE energy_meters
                     ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 
+                CREATE TABLE IF NOT EXISTS energy_meter_runtime_state (
+                    meter_id TEXT PRIMARY KEY REFERENCES energy_meters(id) ON DELETE CASCADE,
+                    is_online BOOLEAN NOT NULL DEFAULT FALSE,
+                    last_attempt_at TIMESTAMPTZ NOT NULL,
+                    last_ok_at TIMESTAMPTZ,
+                    last_error TEXT,
+                    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                    last_poll_duration_ms BIGINT,
+                    updated_at TIMESTAMPTZ NOT NULL
+                );
+
+                ALTER TABLE energy_meter_runtime_state
+                    ADD COLUMN IF NOT EXISTS is_online BOOLEAN NOT NULL DEFAULT FALSE;
+                ALTER TABLE energy_meter_runtime_state
+                    ADD COLUMN IF NOT EXISTS last_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+                ALTER TABLE energy_meter_runtime_state
+                    ADD COLUMN IF NOT EXISTS last_ok_at TIMESTAMPTZ;
+                ALTER TABLE energy_meter_runtime_state
+                    ADD COLUMN IF NOT EXISTS last_error TEXT;
+                ALTER TABLE energy_meter_runtime_state
+                    ADD COLUMN IF NOT EXISTS consecutive_failures INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE energy_meter_runtime_state
+                    ADD COLUMN IF NOT EXISTS last_poll_duration_ms BIGINT;
+                ALTER TABLE energy_meter_runtime_state
+                    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+                CREATE TABLE IF NOT EXISTS energy_meter_latest_readings (
+                    meter_id TEXT NOT NULL REFERENCES energy_meters(id) ON DELETE CASCADE,
+                    metric_key TEXT NOT NULL,
+                    unit TEXT,
+                    value_text TEXT NOT NULL,
+                    value_num DOUBLE PRECISION,
+                    measured_at TIMESTAMPTZ NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL,
+                    PRIMARY KEY (meter_id, metric_key)
+                );
+
+                ALTER TABLE energy_meter_latest_readings
+                    ADD COLUMN IF NOT EXISTS unit TEXT;
+                ALTER TABLE energy_meter_latest_readings
+                    ADD COLUMN IF NOT EXISTS value_text TEXT NOT NULL DEFAULT '';
+                ALTER TABLE energy_meter_latest_readings
+                    ADD COLUMN IF NOT EXISTS value_num DOUBLE PRECISION;
+                ALTER TABLE energy_meter_latest_readings
+                    ADD COLUMN IF NOT EXISTS measured_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+                ALTER TABLE energy_meter_latest_readings
+                    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
                 ALTER TABLE badges
                     ALTER COLUMN user_id DROP NOT NULL;
 
@@ -249,6 +352,7 @@ impl Database {
                     connector_id INTEGER NOT NULL,
                     evse_id INTEGER,
                     active BOOLEAN NOT NULL DEFAULT TRUE,
+                    auto_remote_start_badge_code TEXT,
                     current_status TEXT,
                     current_error_code TEXT,
                     current_status_at TIMESTAMPTZ,
@@ -262,6 +366,8 @@ impl Database {
                     ADD COLUMN IF NOT EXISTS evse_id INTEGER;
                 ALTER TABLE charging_connectors
                     ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE;
+                ALTER TABLE charging_connectors
+                    ADD COLUMN IF NOT EXISTS auto_remote_start_badge_code TEXT;
                 ALTER TABLE charging_connectors
                     ADD COLUMN IF NOT EXISTS current_status TEXT;
                 ALTER TABLE charging_connectors
@@ -647,6 +753,7 @@ impl Database {
                     connector_id,
                     evse_id,
                     active,
+                    auto_remote_start_badge_code,
                     current_status,
                     current_error_code,
                     current_status_at,
@@ -674,6 +781,7 @@ impl Database {
                     connector_id,
                     evse_id,
                     active,
+                    auto_remote_start_badge_code,
                     current_status,
                     current_error_code,
                     current_status_at,
@@ -704,6 +812,7 @@ impl Database {
                     connector_id,
                     evse_id,
                     active,
+                    auto_remote_start_badge_code,
                     current_status,
                     current_error_code,
                     current_status_at,
@@ -743,6 +852,34 @@ impl Database {
                     updated_at = EXCLUDED.updated_at
                 "#,
                 &[&station_id, &connector_id, &active, &now],
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    pub async fn set_connector_auto_remote_start_badge_code(
+        &self,
+        station_id: &str,
+        connector_id: i32,
+        auto_remote_start_badge_code: Option<&str>,
+    ) -> Result<(), Error> {
+        let now: DateTime<Utc> = Utc::now();
+        self.client
+            .execute(
+                r#"
+                INSERT INTO charging_connectors (
+                    station_id,
+                    connector_id,
+                    auto_remote_start_badge_code,
+                    updated_at
+                )
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (station_id, connector_id) DO UPDATE
+                SET auto_remote_start_badge_code = EXCLUDED.auto_remote_start_badge_code,
+                    updated_at = EXCLUDED.updated_at
+                "#,
+                &[&station_id, &connector_id, &auto_remote_start_badge_code, &now],
             )
             .await?;
 
@@ -857,6 +994,50 @@ impl Database {
         Ok(())
     }
 
+    pub async fn clear_connector_transaction_by_ocpp_id(
+        &self,
+        station_id: &str,
+        ocpp_transaction_id: i32,
+    ) -> Result<(), Error> {
+        let now: DateTime<Utc> = Utc::now();
+        self.client
+            .execute(
+                r#"
+                UPDATE charging_connectors
+                SET active_transaction_id = NULL,
+                    updated_at = $3
+                WHERE station_id = $1
+                  AND active_transaction_id = $2
+                "#,
+                &[&station_id, &ocpp_transaction_id, &now],
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    pub async fn clear_connector_transaction_by_ocpp_ref(
+        &self,
+        station_id: &str,
+        ocpp_transaction_ref: &str,
+    ) -> Result<(), Error> {
+        let now: DateTime<Utc> = Utc::now();
+        self.client
+            .execute(
+                r#"
+                UPDATE charging_connectors
+                SET active_transaction_ref = NULL,
+                    updated_at = $3
+                WHERE station_id = $1
+                  AND active_transaction_ref = $2
+                "#,
+                &[&station_id, &ocpp_transaction_ref, &now],
+            )
+            .await?;
+
+        Ok(())
+    }
+
     pub async fn active_connector_for_station(
         &self,
         station_id: &str,
@@ -869,6 +1050,8 @@ impl Database {
                     station_id,
                     connector_id,
                     evse_id,
+                    active,
+                    auto_remote_start_badge_code,
                     current_status,
                     current_error_code,
                     current_status_at,
@@ -890,6 +1073,7 @@ impl Database {
             connector_id: row.get("connector_id"),
             evse_id: row.get("evse_id"),
             active: row.get("active"),
+            auto_remote_start_badge_code: row.get("auto_remote_start_badge_code"),
             current_status: row.get("current_status"),
             current_error_code: row.get("current_error_code"),
             current_status_at: row.get("current_status_at"),
@@ -931,6 +1115,25 @@ impl Database {
         }
     }
 
+    pub async fn record_energy_meter_measurements(&self, records: &[EnergyMeterMeasurementRecord]) {
+        let Some(writer) = self.greptime.as_ref() else {
+            return;
+        };
+
+        if let Err(err) = writer.write_energy_meter_measurements(records).await {
+            let meter_id = records
+                .first()
+                .map(|record| record.meter_id.as_str())
+                .unwrap_or("-");
+            eprintln!(
+                "greptime write fallito per misure meter {} ({} righe): {}",
+                meter_id,
+                records.len(),
+                err
+            );
+        }
+    }
+
     pub async fn list_ocpp_messages(
         &self,
         limit: i64,
@@ -941,6 +1144,18 @@ impl Database {
         };
 
         writer.query_ocpp_messages(limit, station_ids).await
+    }
+
+    pub async fn list_energy_meter_measurements(
+        &self,
+        meter_id: &str,
+        limit: i64,
+    ) -> Result<Vec<EnergyMeterMeasurementRow>, String> {
+        let Some(writer) = self.greptime.as_ref() else {
+            return Ok(Vec::new());
+        };
+
+        writer.query_energy_meter_measurements(meter_id, limit).await
     }
 
     pub async fn station_ids_for_station_name(
@@ -1171,6 +1386,63 @@ impl Database {
         Ok(rows.iter().map(row_to_energy_meter).collect())
     }
 
+    pub async fn list_energy_meter_statuses(&self) -> Result<Vec<EnergyMeterStatusView>, Error> {
+        let runtime_rows = self
+            .client
+            .query(
+                r#"
+                SELECT meter_id, is_online, last_attempt_at, last_ok_at, last_error, consecutive_failures, last_poll_duration_ms, updated_at
+                FROM energy_meter_runtime_state
+                ORDER BY meter_id
+                "#,
+                &[],
+            )
+            .await?;
+        let latest_rows = self
+            .client
+            .query(
+                r#"
+                SELECT meter_id, metric_key, unit, value_text, value_num, measured_at, updated_at
+                FROM energy_meter_latest_readings
+                ORDER BY meter_id, metric_key
+                "#,
+                &[],
+            )
+            .await?;
+
+        use std::collections::HashMap;
+
+        let mut by_meter: HashMap<String, EnergyMeterStatusView> = HashMap::new();
+        for row in runtime_rows {
+            let runtime = row_to_energy_meter_runtime_status(&row);
+            by_meter.insert(
+                runtime.meter_id.clone(),
+                EnergyMeterStatusView {
+                    meter_id: runtime.meter_id.clone(),
+                    runtime: Some(runtime),
+                    latest_readings: Vec::new(),
+                },
+            );
+        }
+
+        for row in latest_rows {
+            let reading = row_to_energy_meter_latest_reading(&row);
+            by_meter
+                .entry(reading.meter_id.clone())
+                .or_insert_with(|| EnergyMeterStatusView {
+                    meter_id: reading.meter_id.clone(),
+                    runtime: None,
+                    latest_readings: Vec::new(),
+                })
+                .latest_readings
+                .push(reading);
+        }
+
+        let mut items: Vec<_> = by_meter.into_values().collect();
+        items.sort_by(|left, right| left.meter_id.cmp(&right.meter_id));
+        Ok(items)
+    }
+
     pub async fn update_energy_meter(
         &self,
         meter_id: &str,
@@ -1229,6 +1501,98 @@ impl Database {
             .await?;
         self.sync_site_config_energy_meter_reference(meter_id, None)
             .await?;
+        Ok(())
+    }
+
+    pub async fn upsert_energy_meter_runtime_status(
+        &self,
+        update: &EnergyMeterRuntimeStatusUpdate,
+    ) -> Result<(), Error> {
+        let now = Utc::now();
+        self.client
+            .execute(
+                r#"
+                INSERT INTO energy_meter_runtime_state (
+                    meter_id,
+                    is_online,
+                    last_attempt_at,
+                    last_ok_at,
+                    last_error,
+                    consecutive_failures,
+                    last_poll_duration_ms,
+                    updated_at
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                ON CONFLICT (meter_id) DO UPDATE
+                SET is_online = EXCLUDED.is_online,
+                    last_attempt_at = EXCLUDED.last_attempt_at,
+                    last_ok_at = CASE
+                        WHEN EXCLUDED.last_ok_at IS NOT NULL THEN EXCLUDED.last_ok_at
+                        ELSE energy_meter_runtime_state.last_ok_at
+                    END,
+                    last_error = EXCLUDED.last_error,
+                    consecutive_failures = CASE
+                        WHEN EXCLUDED.is_online THEN 0
+                        ELSE energy_meter_runtime_state.consecutive_failures + EXCLUDED.consecutive_failures
+                    END,
+                    last_poll_duration_ms = EXCLUDED.last_poll_duration_ms,
+                    updated_at = EXCLUDED.updated_at
+                "#,
+                &[
+                    &update.meter_id,
+                    &update.is_online,
+                    &update.last_attempt_at,
+                    &update.last_ok_at,
+                    &update.last_error,
+                    &update.consecutive_failures,
+                    &update.last_poll_duration_ms,
+                    &now,
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn replace_energy_meter_latest_readings(
+        &self,
+        meter_id: &str,
+        readings: Vec<EnergyMeterLatestReadingUpsert>,
+    ) -> Result<(), Error> {
+        self.client
+            .execute(
+            "DELETE FROM energy_meter_latest_readings WHERE meter_id = $1",
+            &[&meter_id],
+        )
+            .await?;
+
+        let now = Utc::now();
+        for reading in readings {
+            self.client
+                .execute(
+                r#"
+                INSERT INTO energy_meter_latest_readings (
+                    meter_id,
+                    metric_key,
+                    unit,
+                    value_text,
+                    value_num,
+                    measured_at,
+                    updated_at
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                "#,
+                &[
+                    &reading.meter_id,
+                    &reading.metric_key,
+                    &reading.unit,
+                    &reading.value_text,
+                    &reading.value_num,
+                    &reading.measured_at,
+                    &now,
+                ],
+            )
+                .await?;
+        }
         Ok(())
     }
 
@@ -1810,6 +2174,7 @@ fn row_to_connector_summary(row: &Row) -> ConnectorSummary {
         connector_id: row.get("connector_id"),
         evse_id: row.get("evse_id"),
         active: row.get("active"),
+        auto_remote_start_badge_code: row.get("auto_remote_start_badge_code"),
         current_status: row.get("current_status"),
         current_error_code: row.get("current_error_code"),
         current_status_at: row.get("current_status_at"),
@@ -2009,6 +2374,31 @@ fn row_to_energy_meter(row: &Row) -> EnergyMeter {
         max_current_a: row.get("max_current_a"),
         notes: row.get("notes"),
         created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+fn row_to_energy_meter_runtime_status(row: &Row) -> EnergyMeterRuntimeStatus {
+    EnergyMeterRuntimeStatus {
+        meter_id: row.get("meter_id"),
+        is_online: row.get("is_online"),
+        last_attempt_at: row.get("last_attempt_at"),
+        last_ok_at: row.get("last_ok_at"),
+        last_error: row.get("last_error"),
+        consecutive_failures: row.get("consecutive_failures"),
+        last_poll_duration_ms: row.get("last_poll_duration_ms"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+fn row_to_energy_meter_latest_reading(row: &Row) -> EnergyMeterLatestReading {
+    EnergyMeterLatestReading {
+        meter_id: row.get("meter_id"),
+        metric_key: row.get("metric_key"),
+        unit: row.get("unit"),
+        value_text: row.get("value_text"),
+        value_num: row.get("value_num"),
+        measured_at: row.get("measured_at"),
         updated_at: row.get("updated_at"),
     }
 }

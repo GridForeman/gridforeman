@@ -11,6 +11,7 @@ pub struct GreptimeConfig {
     pub database: String,
     pub table: String,
     pub charging_measurements_table: String,
+    pub energy_meter_measurements_table: String,
     pub username: Option<String>,
     pub password: Option<String>,
 }
@@ -69,6 +70,26 @@ pub struct ChargingMeasurementRecord {
     pub value_wh: Option<i64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct EnergyMeterMeasurementRecord {
+    pub meter_id: String,
+    pub metric_key: String,
+    pub unit: String,
+    pub measured_at: DateTime<Utc>,
+    pub value_text: String,
+    pub value_num: f64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EnergyMeterMeasurementRow {
+    pub meter_id: String,
+    pub metric_key: String,
+    pub unit: Option<String>,
+    pub value_text: String,
+    pub value_num: Option<f64>,
+    pub measured_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Deserialize)]
 struct GreptimeSqlResponse {
     output: Vec<GreptimeSqlOutput>,
@@ -124,6 +145,9 @@ impl GreptimeWriter {
         let table = std::env::var("GREPTIME_TABLE").unwrap_or_else(|_| "ocpp_messages".to_string());
         let charging_measurements_table = std::env::var("GREPTIME_CHARGING_MEASUREMENTS_TABLE")
             .unwrap_or_else(|_| "charging_measurements".to_string());
+        let energy_meter_measurements_table =
+            std::env::var("GREPTIME_ENERGY_METER_MEASUREMENTS_TABLE")
+                .unwrap_or_else(|_| "energy_meter_measurements".to_string());
         let username = std::env::var("GREPTIME_USERNAME").ok();
         let password = std::env::var("GREPTIME_PASSWORD").ok();
 
@@ -136,6 +160,7 @@ impl GreptimeWriter {
                 database,
                 table,
                 charging_measurements_table,
+                energy_meter_measurements_table,
                 username,
                 password,
             },
@@ -237,6 +262,73 @@ impl GreptimeWriter {
             let body = response.text().await.unwrap_or_default();
             Err(format!("status={status} body={body}"))
         }
+    }
+
+    pub async fn write_energy_meter_measurements(
+        &self,
+        records: &[EnergyMeterMeasurementRecord],
+    ) -> Result<(), String> {
+        if records.is_empty() {
+            return Ok(());
+        }
+
+        let body = records
+            .iter()
+            .map(|record| {
+                energy_meter_measurement_to_line_protocol(
+                    &self.config.energy_meter_measurements_table,
+                    record,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let mut request = self.client.post(self.write_url()).body(body);
+        if let Some(username) = self.config.username.as_deref() {
+            request = request.basic_auth(username, self.config.password.as_deref());
+        }
+
+        let response = request.send().await.map_err(|err| err.to_string())?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            Err(format!("status={status} body={body}"))
+        }
+    }
+
+    pub async fn query_energy_meter_measurements(
+        &self,
+        meter_id: &str,
+        limit: i64,
+    ) -> Result<Vec<EnergyMeterMeasurementRow>, String> {
+        let sql = format!(
+            "SELECT meter_id, metric_key, unit, value_text, value_num, greptime_timestamp AS measured_at FROM {} WHERE meter_id = '{}' ORDER BY greptime_timestamp DESC LIMIT {}",
+            quote_ident(&self.config.energy_meter_measurements_table),
+            escape_sql_literal(meter_id),
+            limit.clamp(1, 1000),
+        );
+
+        let mut request = self.client.post(self.sql_url()).form(&[("sql", sql)]);
+        if let Some(username) = self.config.username.as_deref() {
+            request = request.basic_auth(username, self.config.password.as_deref());
+        }
+
+        let response = request.send().await.map_err(|err| err.to_string())?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            if status.as_u16() == 400 && body.contains("Table not found") {
+                return Ok(Vec::new());
+            }
+            return Err(format!("status={status} body={body}"));
+        }
+
+        let body = response.text().await.map_err(|err| err.to_string())?;
+        let payload: GreptimeSqlResponse =
+            serde_json::from_str(&body).map_err(|err| err.to_string())?;
+        Ok(map_energy_meter_rows(payload))
     }
 
     fn write_url(&self) -> Url {
@@ -389,6 +481,30 @@ fn charging_measurement_to_line_protocol(
     )
 }
 
+fn energy_meter_measurement_to_line_protocol(
+    table: &str,
+    record: &EnergyMeterMeasurementRecord,
+) -> String {
+    let tags = [
+        format!("meter_id={}", escape_tag(&record.meter_id)),
+        format!("metric_key={}", escape_tag(&record.metric_key)),
+    ];
+
+    let fields = [
+        field_str("unit", &record.unit),
+        field_str("value_text", &record.value_text),
+        format!("value_num={}", record.value_num),
+    ];
+
+    format!(
+        "{},{} {} {}",
+        escape_measurement(table),
+        tags.join(","),
+        fields.join(","),
+        record.measured_at.timestamp_millis()
+    )
+}
+
 fn field_str(key: &str, value: &str) -> String {
     format!("{key}=\"{}\"", escape_field_string(value))
 }
@@ -434,6 +550,51 @@ fn map_sql_response(payload: GreptimeSqlResponse) -> Vec<OcppEventRow> {
         .collect();
 
     events
+}
+
+fn map_energy_meter_rows(payload: GreptimeSqlResponse) -> Vec<EnergyMeterMeasurementRow> {
+    let Some(records) = payload.output.into_iter().find_map(|output| output.records) else {
+        return Vec::new();
+    };
+
+    records
+        .rows
+        .into_iter()
+        .map(|row| map_energy_meter_row(&records.schema.column_schemas, row))
+        .collect()
+}
+
+fn map_energy_meter_row(
+    columns: &[GreptimeSqlColumnSchema],
+    row: Vec<Value>,
+) -> EnergyMeterMeasurementRow {
+    let mut meter_id = None;
+    let mut metric_key = None;
+    let mut unit = None;
+    let mut value_text = None;
+    let mut value_num = None;
+    let mut measured_at = None;
+
+    for (column, value) in columns.iter().zip(row.into_iter()) {
+        match column.name.as_str() {
+            "meter_id" => meter_id = value_to_string(&value),
+            "metric_key" => metric_key = value_to_string(&value),
+            "unit" => unit = value_to_string(&value),
+            "value_text" => value_text = value_to_string(&value),
+            "value_num" => value_num = value_to_f64(&value),
+            "measured_at" => measured_at = value_to_datetime(&value),
+            _ => {}
+        }
+    }
+
+    EnergyMeterMeasurementRow {
+        meter_id: meter_id.unwrap_or_else(|| "unknown".to_string()),
+        metric_key: metric_key.unwrap_or_else(|| "unknown".to_string()),
+        unit,
+        value_text: value_text.unwrap_or_default(),
+        value_num,
+        measured_at: measured_at.unwrap_or_else(Utc::now),
+    }
 }
 
 fn map_event_row(columns: &[GreptimeSqlColumnSchema], row: Vec<Value>) -> OcppEventRow {
@@ -503,6 +664,14 @@ fn value_to_string(value: &Value) -> Option<String> {
 fn value_to_i64(value: &Value) -> Option<i64> {
     match value {
         Value::Number(number) => number.as_i64(),
+        Value::String(text) => text.parse().ok(),
+        _ => None,
+    }
+}
+
+fn value_to_f64(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(number) => number.as_f64(),
         Value::String(text) => text.parse().ok(),
         _ => None,
     }

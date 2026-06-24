@@ -3,13 +3,40 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use serde::Serialize;
 use tokio::sync::{mpsc, oneshot};
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct StationConfigurationEntry {
+    pub(crate) key: String,
+    pub(crate) readonly: bool,
+    pub(crate) value: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub(crate) struct StationConfigurationSnapshot {
+    pub(crate) configuration_keys: Vec<StationConfigurationEntry>,
+    pub(crate) unknown_keys: Vec<String>,
+}
 
 #[derive(Debug)]
 pub(crate) enum StationCommand {
     BlockStation {
         blocked: bool,
         reply: oneshot::Sender<Result<(), String>>,
+    },
+    RemoteStartTransaction {
+        connector_id: u32,
+        badge_code: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    RemoteStopTransaction {
+        transaction_id: Option<i32>,
+        transaction_ref: Option<String>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    GetConfiguration {
+        reply: oneshot::Sender<Result<StationConfigurationSnapshot, String>>,
     },
     SetConnectorActive {
         connector_id: u32,

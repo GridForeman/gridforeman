@@ -35,8 +35,9 @@ use crate::{
     db::Database,
     ocpp_runtime::{
         BadgeAuthorizationDecision, ConnectionContext, OcppCall, SessionState, authorize_badge,
-        charging_measurements_from_meter_values_v16, log_unparsed_ocpp_frame,
-        record_parse_error, resolve_authorized_badge, save_ocpp_event,
+        OcppSink, charging_measurements_from_meter_values_v16, log_unparsed_ocpp_frame,
+        maybe_auto_remote_start_on_preparing, record_parse_error, resolve_authorized_badge,
+        save_ocpp_event,
         synthetic_v16_energy_measurement, transaction_energy_from_meter_values_v16,
     },
     users::UserId,
@@ -46,6 +47,7 @@ pub(crate) async fn handle_v16_call(
     context: &ConnectionContext,
     session: &mut SessionState,
     db: &Database,
+    sink: &mut OcppSink,
     call: &OcppCall<'_>,
 ) -> Result<Option<Message>, Error> {
     match call.action {
@@ -123,19 +125,6 @@ pub(crate) async fn handle_v16_call(
                 current_time: Utc::now(),
             };
             let reply_text = json!([3, call.unique_id, response]).to_string();
-            save_ocpp_event(
-                db,
-                context,
-                "outbound",
-                Some(3),
-                Some(call.unique_id),
-                Some(call.action),
-                &reply_text,
-                None,
-                "response",
-                None,
-            )
-            .await;
             Ok(Some(Message::Text(reply_text)))
         }
         "StartTransaction" => {
@@ -320,13 +309,22 @@ pub(crate) async fn handle_v16_call(
             .await;
             session.active_transaction_id = None;
             session.active_badge = None;
-            if let Some(connector_id) = session.active_connector_id.take()
-                && let Err(err) = db
+            if let Some(connector_id) = session.active_connector_id.take() {
+                if let Err(err) = db
                     .clear_connector_transaction(&context.station_id, connector_id as i32)
                     .await
+                {
+                    eprintln!(
+                        "postgres clear_connector_transaction fallito per {}: {}",
+                        context.station_id, err
+                    );
+                }
+            } else if let Err(err) = db
+                .clear_connector_transaction_by_ocpp_id(&context.station_id, request.transaction_id)
+                .await
             {
                 eprintln!(
-                    "postgres clear_connector_transaction fallito per {}: {}",
+                    "postgres clear_connector_transaction_by_ocpp_id fallito per {}: {}",
                     context.station_id, err
                 );
             }
@@ -438,6 +436,20 @@ pub(crate) async fn handle_v16_call(
                 "StatusNotification 1.6 da {}: connector={} status={:?} error={:?}",
                 context.station_id, request.connector_id, request.status, request.error_code
             );
+            let status_text = format!("{:?}", request.status);
+            let error_text = format!("{:?}", request.error_code);
+
+            if request.connector_id > 0 {
+                maybe_auto_remote_start_on_preparing(
+                    context,
+                    session,
+                    db,
+                    sink,
+                    request.connector_id as i32,
+                    &status_text,
+                )
+                .await;
+            }
 
             if request.connector_id > 0
                 && let Err(err) = db
@@ -445,8 +457,8 @@ pub(crate) async fn handle_v16_call(
                         &context.station_id,
                         request.connector_id as i32,
                         None,
-                        Some(format!("{:?}", request.status)),
-                        Some(format!("{:?}", request.error_code)),
+                        Some(status_text.clone()),
+                        Some(error_text.clone()),
                         Some(request.timestamp.unwrap_or_else(Utc::now)),
                     )
                     .await
@@ -460,8 +472,8 @@ pub(crate) async fn handle_v16_call(
             if let Err(err) = db
                 .update_station_status(
                     &context.station_id,
-                    Some(format!("{:?}", request.status)),
-                    Some(format!("{:?}", request.error_code)),
+                    Some(status_text),
+                    Some(error_text),
                     if request.connector_id > 0 {
                         Some(request.connector_id as i32)
                     } else {

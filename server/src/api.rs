@@ -2,21 +2,22 @@ use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
-    routing::{get, patch},
+    routing::{get, patch, post},
 };
 use serde::Deserialize;
 
 use crate::{
-    app_state::{ConnectionRegistry, StationCommand},
+    app_state::{ConnectionRegistry, StationCommand, StationConfigurationSnapshot},
     badges::{BadgeId, NewBadge},
     db::ChargingTransaction,
     db::ConnectorSummary,
     db::Database,
     db::EnergyMeter,
+    db::EnergyMeterStatusView,
     db::StationLocation,
     db::StationSummary,
     energy_meter_catalog::EnergyMeterCatalog,
-    greptime::OcppEventRow,
+    greptime::{EnergyMeterMeasurementRow, OcppEventRow},
     realtime::{self, RealtimeNotifier, RealtimeState},
     site_config::{SiteConfigSnapshot, SiteEnergyMeter},
     users::{NewUser, UserId},
@@ -63,8 +64,24 @@ pub async fn run_api_server(
             patch(set_connector_active),
         )
         .route(
+            "/api/stations/{station_id}/connectors/{connector_id}/auto-remote-start-badge",
+            patch(set_connector_auto_remote_start_badge),
+        )
+        .route(
+            "/api/stations/{station_id}/connectors/{connector_id}/remote-start",
+            patch(remote_start_connector_transaction),
+        )
+        .route(
+            "/api/stations/{station_id}/connectors/{connector_id}/remote-stop",
+            patch(remote_stop_connector_transaction),
+        )
+        .route(
             "/api/stations/{station_id}/connectors/{connector_id}/unlock",
             patch(unlock_connector),
+        )
+        .route(
+            "/api/stations/{station_id}/configuration",
+            post(get_station_configuration),
         )
         .route(
             "/api/stations/{station_id}/location",
@@ -77,7 +94,9 @@ pub async fn run_api_server(
         .route("/api/badges/{badge_id}", patch(update_badge))
         .route("/api/badges/{badge_id}/active", patch(set_badge_active))
         .route("/api/energy-meters", get(list_energy_meters).post(create_energy_meter))
+        .route("/api/energy-meters/status", get(list_energy_meter_statuses))
         .route("/api/energy-meters/{meter_id}", patch(update_energy_meter).delete(delete_energy_meter))
+        .route("/api/energy-meters/{meter_id}/readings", get(list_energy_meter_readings))
         .route(
             "/api/site-config",
             get(get_site_config).put(update_site_config),
@@ -195,6 +214,58 @@ async fn set_connector_active(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn set_connector_auto_remote_start_badge(
+    State(state): State<ApiState>,
+    Path((station_id, connector_id)): Path<(String, i32)>,
+    Json(payload): Json<SetConnectorAutoRemoteStartBadgeRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    if connector_id <= 0 {
+        return Err((StatusCode::CONFLICT, "connector_id non valido".to_string()));
+    }
+
+    let Some(_connector) = state
+        .db
+        .connector_for_station(&station_id, connector_id)
+        .await
+        .map_err(internal_error)?
+    else {
+        return Err((StatusCode::NOT_FOUND, "connector not found".to_string()));
+    };
+
+    let badge_code = payload
+        .badge_code
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    if let Some(badge_code) = badge_code {
+        let Some(badge) = state
+            .db
+            .get_badge_by_code(badge_code)
+            .await
+            .map_err(internal_error)?
+        else {
+            return Err((StatusCode::CONFLICT, "badge_code non trovato".to_string()));
+        };
+
+        if !badge.active || badge.user_id.is_none() {
+            return Err((
+                StatusCode::CONFLICT,
+                "badge_code non idoneo per remote start automatico".to_string(),
+            ));
+        }
+    }
+
+    state
+        .db
+        .set_connector_auto_remote_start_badge_code(&station_id, connector_id, badge_code)
+        .await
+        .map_err(internal_error)?;
+    state.notifier.notify();
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn set_station_blocked(
     State(state): State<ApiState>,
     Path(station_id): Path<String>,
@@ -273,6 +344,147 @@ async fn unlock_connector(
     }
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn remote_start_connector_transaction(
+    State(state): State<ApiState>,
+    Path((station_id, connector_id)): Path<(String, i32)>,
+    Json(payload): Json<RemoteStartTransactionRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    if connector_id <= 0 {
+        return Err((StatusCode::CONFLICT, "connector_id non valido".to_string()));
+    }
+
+    let badge_code = payload.badge_code.trim();
+    if badge_code.is_empty() {
+        return Err((StatusCode::CONFLICT, "badge_code mancante".to_string()));
+    }
+
+    let Some(connector) = state
+        .db
+        .connector_for_station(&station_id, connector_id)
+        .await
+        .map_err(internal_error)?
+    else {
+        return Err((StatusCode::NOT_FOUND, "connector not found".to_string()));
+    };
+
+    if connector.active_transaction_id.is_some() || connector.active_transaction_ref.is_some() {
+        return Err((
+            StatusCode::CONFLICT,
+            "connettore con transazione gia attiva".to_string(),
+        ));
+    }
+
+    let connector_id = u32::try_from(connector.connector_id)
+        .map_err(|_| (StatusCode::CONFLICT, "connector_id non valido".to_string()))?;
+
+    let Some(sender) = state.connections.sender(&station_id) else {
+        return Err((StatusCode::CONFLICT, "colonnina non connessa".to_string()));
+    };
+
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    sender
+        .send(StationCommand::RemoteStartTransaction {
+            connector_id,
+            badge_code: badge_code.to_string(),
+            reply: reply_tx,
+        })
+        .map_err(|_| {
+            (
+                StatusCode::CONFLICT,
+                "colonnina connessa ma coda comandi chiusa".to_string(),
+            )
+        })?;
+
+    match reply_rx.await {
+        Ok(Ok(())) => Ok(StatusCode::NO_CONTENT),
+        Ok(Err(err)) => Err((StatusCode::CONFLICT, err)),
+        Err(_) => Err((
+            StatusCode::CONFLICT,
+            "risposta remote start persa".to_string(),
+        )),
+    }
+}
+
+async fn remote_stop_connector_transaction(
+    State(state): State<ApiState>,
+    Path((station_id, connector_id)): Path<(String, i32)>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    if connector_id <= 0 {
+        return Err((StatusCode::CONFLICT, "connector_id non valido".to_string()));
+    }
+
+    let Some(connector) = state
+        .db
+        .connector_for_station(&station_id, connector_id)
+        .await
+        .map_err(internal_error)?
+    else {
+        return Err((StatusCode::NOT_FOUND, "connector not found".to_string()));
+    };
+
+    if connector.active_transaction_id.is_none() && connector.active_transaction_ref.is_none() {
+        return Err((
+            StatusCode::CONFLICT,
+            "connettore senza transazione attiva".to_string(),
+        ));
+    }
+
+    let Some(sender) = state.connections.sender(&station_id) else {
+        return Err((StatusCode::CONFLICT, "colonnina non connessa".to_string()));
+    };
+
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    sender
+        .send(StationCommand::RemoteStopTransaction {
+            transaction_id: connector.active_transaction_id,
+            transaction_ref: connector.active_transaction_ref,
+            reply: reply_tx,
+        })
+        .map_err(|_| {
+            (
+                StatusCode::CONFLICT,
+                "colonnina connessa ma coda comandi chiusa".to_string(),
+            )
+        })?;
+
+    match reply_rx.await {
+        Ok(Ok(())) => Ok(StatusCode::NO_CONTENT),
+        Ok(Err(err)) => Err((StatusCode::CONFLICT, err)),
+        Err(_) => Err((
+            StatusCode::CONFLICT,
+            "risposta remote stop persa".to_string(),
+        )),
+    }
+}
+
+async fn get_station_configuration(
+    State(state): State<ApiState>,
+    Path(station_id): Path<String>,
+) -> Result<Json<StationConfigurationSnapshot>, (StatusCode, String)> {
+    let Some(sender) = state.connections.sender(&station_id) else {
+        return Err((StatusCode::CONFLICT, "colonnina non connessa".to_string()));
+    };
+
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    sender
+        .send(StationCommand::GetConfiguration { reply: reply_tx })
+        .map_err(|_| {
+            (
+                StatusCode::CONFLICT,
+                "colonnina connessa ma coda comandi chiusa".to_string(),
+            )
+        })?;
+
+    match reply_rx.await {
+        Ok(Ok(snapshot)) => Ok(Json(snapshot)),
+        Ok(Err(err)) => Err((StatusCode::CONFLICT, err)),
+        Err(_) => Err((
+            StatusCode::CONFLICT,
+            "risposta get configuration persa".to_string(),
+        )),
+    }
 }
 
 async fn update_station_location(
@@ -446,6 +658,11 @@ struct LimitQuery {
     limit: Option<i64>,
 }
 
+#[derive(Debug, Deserialize)]
+struct EnergyMeterReadingsQuery {
+    limit: Option<i64>,
+}
+
 async fn list_events(
     State(state): State<ApiState>,
     Query(query): Query<EventsQuery>,
@@ -488,6 +705,31 @@ async fn list_energy_meters(
     state
         .db
         .list_energy_meters()
+        .await
+        .map(Json)
+        .map_err(internal_error)
+}
+
+async fn list_energy_meter_statuses(
+    State(state): State<ApiState>,
+) -> Result<Json<Vec<EnergyMeterStatusView>>, (StatusCode, String)> {
+    state
+        .db
+        .list_energy_meter_statuses()
+        .await
+        .map(Json)
+        .map_err(internal_error)
+}
+
+async fn list_energy_meter_readings(
+    State(state): State<ApiState>,
+    Path(meter_id): Path<String>,
+    Query(query): Query<EnergyMeterReadingsQuery>,
+) -> Result<Json<Vec<EnergyMeterMeasurementRow>>, (StatusCode, String)> {
+    let limit = query.limit.unwrap_or(100).clamp(1, 1000);
+    state
+        .db
+        .list_energy_meter_measurements(&meter_id, limit)
         .await
         .map(Json)
         .map_err(internal_error)
@@ -597,6 +839,16 @@ struct SetStationBlockedRequest {
 #[derive(Debug, Deserialize)]
 struct SetConnectorActiveRequest {
     active: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct SetConnectorAutoRemoteStartBadgeRequest {
+    badge_code: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteStartTransactionRequest {
+    badge_code: String,
 }
 
 #[derive(Debug, Deserialize)]

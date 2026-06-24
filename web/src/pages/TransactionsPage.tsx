@@ -101,7 +101,7 @@ export function TransactionsPage({ stations, users, badges }: Props) {
   }, [badges, userFilter]);
 
   async function loadTransactions(keepVisible = true) {
-    if (loading || refreshing) return;
+    if (refreshing || (keepVisible && loading)) return;
     if (!keepVisible) {
       setLoading(true);
     } else {

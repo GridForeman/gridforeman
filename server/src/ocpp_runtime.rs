@@ -12,7 +12,7 @@ use std::{
     collections::HashMap,
     net::SocketAddr,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{
     net::TcpStream,
@@ -28,9 +28,13 @@ use tokio_tungstenite::{
         http::{HeaderMap, HeaderValue, StatusCode, header::SEC_WEBSOCKET_PROTOCOL},
     },
 };
+use uuid::Uuid;
 
 use crate::{
-    app_state::{ConnectionRegistry, StationCommand},
+    app_state::{
+        ConnectionRegistry, StationCommand, StationConfigurationEntry,
+        StationConfigurationSnapshot,
+    },
     db::Database,
     greptime::{ChargingMeasurementRecord, OcppMessageRecord},
     ocpp_v16::handle_v16_call,
@@ -109,6 +113,7 @@ pub(crate) struct SessionState {
     pub(crate) active_connector_id_v201: Option<i32>,
     pub(crate) active_badge: Option<AuthorizedBadge>,
     pub(crate) pending_requests: HashMap<String, Sender<Value>>,
+    pub(crate) ignored_responses: HashMap<String, Instant>,
 }
 
 #[derive(Debug, Clone)]
@@ -280,8 +285,10 @@ async fn accept_charge_point(
 
                 match message {
                     Message::Text(text) => {
-                        if let Some(reply) = handle_ocpp_text(&context, &mut session, &text, &db).await? {
-                            if let Message::Text(reply_text) = &reply {
+                        if let Some(reply) = handle_ocpp_text(&context, &mut session, &text, &db, &mut sink).await? {
+                            if let Message::Text(reply_text) = &reply
+                                && !is_heartbeat_response_text(reply_text)
+                            {
                                 log_ocpp_packet(
                                     &context,
                                     "outbound",
@@ -312,6 +319,41 @@ async fn accept_charge_point(
                 match cmd {
                     StationCommand::BlockStation { blocked, reply } => {
                         let result = handle_block_station_command(&context, &mut session, &mut sink, blocked).await;
+                        let _ = reply.send(result);
+                    }
+                    StationCommand::RemoteStartTransaction { connector_id, badge_code, reply } => {
+                        let result = handle_remote_start_transaction_command(
+                            &context,
+                            &mut session,
+                            &mut sink,
+                            connector_id,
+                            &badge_code,
+                        )
+                        .await;
+                        let _ = reply.send(result);
+                    }
+                    StationCommand::RemoteStopTransaction {
+                        transaction_id,
+                        transaction_ref,
+                        reply,
+                    } => {
+                        let result = handle_remote_stop_transaction_command(
+                            &context,
+                            &mut session,
+                            &mut sink,
+                            transaction_id,
+                            transaction_ref.as_deref(),
+                        )
+                        .await;
+                        let _ = reply.send(result);
+                    }
+                    StationCommand::GetConfiguration { reply } => {
+                        let result = handle_get_configuration_command(
+                            &context,
+                            &mut session,
+                            &mut sink,
+                        )
+                        .await;
                         let _ = reply.send(result);
                     }
                     StationCommand::SetConnectorActive { connector_id, evse_id, active, reply } => {
@@ -351,6 +393,7 @@ async fn handle_ocpp_text(
     session: &mut SessionState,
     text: &str,
     db: &Database,
+    sink: &mut OcppSink,
 ) -> Result<Option<Message>, Error> {
     let frame: Value = match serde_json::from_str(text) {
         Ok(frame) => frame,
@@ -452,18 +495,21 @@ async fn handle_ocpp_text(
         _ => Value::Null,
     };
 
-    log_ocpp_packet(
-        context,
-        "inbound",
-        Some("frame"),
-        Some(unique_id.as_str()),
-        Some(action),
-        text,
-    );
+    if !is_heartbeat_action(action) {
+        log_ocpp_packet(
+            context,
+            "inbound",
+            Some("frame"),
+            Some(unique_id.as_str()),
+            Some(action),
+            text,
+        );
+    }
 
     if message_type == 3 {
         if let Some(reply) = session.pending_requests.remove(&unique_id) {
             let _ = reply.send(payload.clone());
+        } else if session.ignored_responses.remove(&unique_id).is_some() {
         } else {
             eprintln!(
                 "risposta OCPP inattesa da {}: unique_id={} payload={}",
@@ -504,19 +550,21 @@ async fn handle_ocpp_text(
         return Ok(None);
     }
 
-    save_ocpp_event(
-        db,
-        context,
-        "inbound",
-        Some(message_type as i64),
-        Some(unique_id.as_str()),
-        Some(action),
-        text,
-        Some(&payload),
-        "parsed",
-        None,
-    )
-    .await;
+    if !is_heartbeat_action(action) {
+        save_ocpp_event(
+            db,
+            context,
+            "inbound",
+            Some(message_type as i64),
+            Some(unique_id.as_str()),
+            Some(action),
+            text,
+            Some(&payload),
+            "parsed",
+            None,
+        )
+        .await;
+    }
 
     if let Err(err) = db
         .touch_station(
@@ -541,8 +589,8 @@ async fn handle_ocpp_text(
     };
 
     match context.version {
-        OcppVersion::V16 => handle_v16_call(context, session, db, &call).await,
-        OcppVersion::V201 => handle_v201_call(context, session, db, &call).await,
+        OcppVersion::V16 => handle_v16_call(context, session, db, sink, &call).await,
+        OcppVersion::V201 => handle_v201_call(context, session, db, sink, &call).await,
     }
 }
 
@@ -835,27 +883,8 @@ pub(crate) async fn handle_block_station_command(
         return Err("blocco OCPP attivo solo per 1.6".to_string());
     }
 
-    if blocked && let Some(transaction_id) = session.active_transaction_id {
-        let stop_response = send_ocpp_request_and_wait(
-            context,
-            session,
-            sink,
-            "RemoteStopTransaction",
-            serde_json::to_value(
-                rust_ocpp::v1_6::messages::remote_stop_transaction::RemoteStopTransactionRequest {
-                    transaction_id,
-                },
-            )
-            .map_err(|err| err.to_string())?,
-        )
-        .await?;
-        let stop_status = stop_response
-            .get("status")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "RemoteStopTransaction.conf senza status".to_string())?;
-        if stop_status != "Accepted" {
-            return Err(format!("RemoteStopTransaction rifiutato: {stop_status}"));
-        }
+    if blocked && session.active_transaction_id.is_some() {
+        handle_remote_stop_transaction_command(context, session, sink, None, None).await?;
     }
 
     let change_response = send_ocpp_request_and_wait(
@@ -884,6 +913,232 @@ pub(crate) async fn handle_block_station_command(
     }
 
     Ok(())
+}
+
+pub(crate) async fn handle_remote_stop_transaction_command(
+    context: &ConnectionContext,
+    session: &mut SessionState,
+    sink: &mut OcppSink,
+    transaction_id: Option<i32>,
+    transaction_ref: Option<&str>,
+) -> Result<(), String> {
+    match context.version {
+        OcppVersion::V16 => {
+            let transaction_id = transaction_id
+                .or(session.active_transaction_id)
+                .ok_or_else(|| "RemoteStopTransaction richiede transaction_id attivo".to_string())?;
+
+            let stop_response = send_ocpp_request_and_wait(
+                context,
+                session,
+                sink,
+                "RemoteStopTransaction",
+                serde_json::to_value(
+                    rust_ocpp::v1_6::messages::remote_stop_transaction::RemoteStopTransactionRequest {
+                        transaction_id,
+                    },
+                )
+                .map_err(|err| err.to_string())?,
+            )
+            .await?;
+
+            let stop_status = stop_response
+                .get("status")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "RemoteStopTransaction.conf senza status".to_string())?;
+            if stop_status != "Accepted" {
+                return Err(format!("RemoteStopTransaction rifiutato: {stop_status}"));
+            }
+        }
+        OcppVersion::V201 => {
+            let transaction_ref = transaction_ref
+                .or(session.active_transaction_id_v201.as_deref())
+                .ok_or_else(|| "RequestStopTransaction richiede transaction_id attivo".to_string())?
+                .to_string();
+
+            let stop_response = send_ocpp_request_and_wait(
+                context,
+                session,
+                sink,
+                "RequestStopTransaction",
+                serde_json::to_value(
+                    rust_ocpp::v2_0_1::messages::request_stop_transaction::RequestStopTransactionRequest {
+                        transaction_id: transaction_ref.clone(),
+                    },
+                )
+                .map_err(|err| err.to_string())?,
+            )
+            .await?;
+
+            let stop_status = stop_response
+                .get("status")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "RequestStopTransaction.conf senza status".to_string())?;
+            if stop_status != "Accepted" {
+                return Err(format!("RequestStopTransaction rifiutato: {stop_status}"));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub(crate) async fn handle_remote_start_transaction_command(
+    context: &ConnectionContext,
+    session: &mut SessionState,
+    sink: &mut OcppSink,
+    connector_id: u32,
+    badge_code: &str,
+) -> Result<(), String> {
+    if !matches!(context.version, OcppVersion::V16) {
+        return Err("remote start OCPP attivo solo per 1.6".to_string());
+    }
+
+    if connector_id == 0 {
+        return Err("connector_id non valido".to_string());
+    }
+
+    if badge_code.trim().is_empty() {
+        return Err("badge_code mancante".to_string());
+    }
+
+    if session.active_transaction_id.is_some() {
+        return Err("transazione gia attiva sulla colonnina".to_string());
+    }
+
+    let start_response = send_ocpp_request_and_wait(
+        context,
+        session,
+        sink,
+        "RemoteStartTransaction",
+        serde_json::to_value(
+            rust_ocpp::v1_6::messages::remote_start_transaction::RemoteStartTransactionRequest {
+                connector_id: Some(connector_id),
+                id_tag: badge_code.to_string(),
+                charging_profile: None,
+            },
+        )
+        .map_err(|err| err.to_string())?,
+    )
+    .await?;
+
+    let start_status = start_response
+        .get("status")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "RemoteStartTransaction.conf senza status".to_string())?;
+    if start_status != "Accepted" {
+        return Err(format!("RemoteStartTransaction rifiutato: {start_status}"));
+    }
+
+    Ok(())
+}
+
+pub(crate) async fn maybe_auto_remote_start_on_preparing(
+    context: &ConnectionContext,
+    session: &mut SessionState,
+    db: &Database,
+    sink: &mut OcppSink,
+    connector_id: i32,
+    next_status: &str,
+) {
+    if next_status != "Preparing" || connector_id <= 0 {
+        return;
+    }
+
+    let connector = match db.connector_for_station(&context.station_id, connector_id).await {
+        Ok(Some(connector)) => connector,
+        Ok(None) => return,
+        Err(err) => {
+            eprintln!(
+                "lookup connector auto remote start fallito per {}#{}: {}",
+                context.station_id, connector_id, err
+            );
+            return;
+        }
+    };
+
+    if connector.current_status.as_deref() == Some("Preparing") {
+        return;
+    }
+
+    if !connector.active {
+        return;
+    }
+
+    if connector.active_transaction_id.is_some() || connector.active_transaction_ref.is_some() {
+        return;
+    }
+
+    let Some(badge_code) = connector.auto_remote_start_badge_code.as_deref() else {
+        return;
+    };
+
+    let badge_code = badge_code.trim();
+    if badge_code.is_empty() {
+        return;
+    }
+
+    if !matches!(context.version, OcppVersion::V16) {
+        eprintln!(
+            "auto remote start ignorato per {}#{}: supportato solo su OCPP 1.6",
+            context.station_id, connector_id
+        );
+        return;
+    }
+
+    if let Err(err) = handle_remote_start_transaction_command(
+        context,
+        session,
+        sink,
+        connector_id as u32,
+        badge_code,
+    )
+    .await
+    {
+        eprintln!(
+            "auto remote start fallito per {}#{} con badge {}: {}",
+            context.station_id, connector_id, badge_code, err
+        );
+    }
+}
+
+pub(crate) async fn handle_get_configuration_command(
+    context: &ConnectionContext,
+    session: &mut SessionState,
+    sink: &mut OcppSink,
+) -> Result<StationConfigurationSnapshot, String> {
+    if !matches!(context.version, OcppVersion::V16) {
+        return Err("GetConfiguration OCPP attivo solo per 1.6".to_string());
+    }
+
+    let response = send_ocpp_request_and_wait(
+        context,
+        session,
+        sink,
+        "GetConfiguration",
+        serde_json::to_value(
+            rust_ocpp::v1_6::messages::get_configuration::GetConfigurationRequest { key: None },
+        )
+        .map_err(|err| err.to_string())?,
+    )
+    .await?;
+
+    let parsed: rust_ocpp::v1_6::messages::get_configuration::GetConfigurationResponse =
+        serde_json::from_value(response).map_err(|err| err.to_string())?;
+
+    Ok(StationConfigurationSnapshot {
+        configuration_keys: parsed
+            .configuration_key
+            .unwrap_or_default()
+            .into_iter()
+            .map(|entry| StationConfigurationEntry {
+                key: entry.key,
+                readonly: entry.readonly,
+                value: entry.value,
+            })
+            .collect(),
+        unknown_keys: parsed.unknown_key.unwrap_or_default(),
+    })
 }
 
 pub(crate) async fn handle_set_connector_active_command(
@@ -1036,12 +1291,8 @@ async fn send_ocpp_request_and_wait(
     action: &'static str,
     payload: Value,
 ) -> Result<Value, String> {
-    let unique_id = format!(
-        "{}-{}-{}",
-        action,
-        context.station_id,
-        Utc::now().timestamp_micros()
-    );
+    prune_ignored_responses(session);
+    let unique_id = Uuid::new_v4().simple().to_string();
     let (tx, rx) = oneshot::channel();
     session.pending_requests.insert(unique_id.clone(), tx);
 
@@ -1059,7 +1310,7 @@ async fn send_ocpp_request_and_wait(
         return Err(err.to_string());
     }
 
-    match tokio::time::timeout(Duration::from_secs(15), rx).await {
+    match tokio::time::timeout(Duration::from_secs(30), rx).await {
         Ok(Ok(response)) => Ok(response),
         Ok(Err(_)) => {
             session.pending_requests.remove(&unique_id);
@@ -1067,9 +1318,19 @@ async fn send_ocpp_request_and_wait(
         }
         Err(_) => {
             session.pending_requests.remove(&unique_id);
+            session
+                .ignored_responses
+                .insert(unique_id, Instant::now() + Duration::from_secs(60));
             Err(format!("timeout aspettando {action}.conf"))
         }
     }
+}
+
+fn prune_ignored_responses(session: &mut SessionState) {
+    let now = Instant::now();
+    session
+        .ignored_responses
+        .retain(|_, expires_at| *expires_at > now);
 }
 
 pub(crate) async fn save_ocpp_event(
@@ -1158,6 +1419,26 @@ pub(crate) fn log_ocpp_packet(
         action.unwrap_or("-"),
         raw_text
     );
+}
+
+fn is_heartbeat_action(action: &str) -> bool {
+    action == "Heartbeat"
+}
+
+fn is_heartbeat_response_text(raw_text: &str) -> bool {
+    let Ok(frame) = serde_json::from_str::<Value>(raw_text) else {
+        return false;
+    };
+    let Some(items) = frame.as_array() else {
+        return false;
+    };
+    if items.len() != 3 || items.first().and_then(Value::as_i64) != Some(3) {
+        return false;
+    }
+    let Some(payload) = items.get(2).and_then(Value::as_object) else {
+        return false;
+    };
+    payload.len() == 1 && payload.contains_key("currentTime")
 }
 
 pub(crate) fn parse_station_id(path: &str) -> Option<&str> {

@@ -35,9 +35,9 @@ use crate::{
     db::Database,
     ocpp_runtime::{
         BadgeAuthorizationDecision, ConnectionContext, OcppCall, SessionState, authorize_badge,
-        charging_measurements_from_meter_values_v201, decision_from_id_token_info,
-        log_unparsed_ocpp_frame, record_parse_error, resolve_authorized_badge, save_ocpp_event,
-        transaction_energy_from_meter_values,
+        OcppSink, charging_measurements_from_meter_values_v201, decision_from_id_token_info,
+        log_unparsed_ocpp_frame, maybe_auto_remote_start_on_preparing, record_parse_error,
+        resolve_authorized_badge, save_ocpp_event, transaction_energy_from_meter_values,
     },
     users::UserId,
 };
@@ -46,6 +46,7 @@ pub(crate) async fn handle_v201_call(
     context: &ConnectionContext,
     session: &mut SessionState,
     db: &Database,
+    sink: &mut OcppSink,
     call: &OcppCall<'_>,
 ) -> Result<Option<Message>, Error> {
     match call.action {
@@ -64,19 +65,6 @@ pub(crate) async fn handle_v201_call(
                 current_time: Utc::now(),
             };
             let reply_text = json!([3, call.unique_id, response]).to_string();
-            save_ocpp_event(
-                db,
-                context,
-                "outbound",
-                Some(3),
-                Some(call.unique_id),
-                Some(call.action),
-                &reply_text,
-                None,
-                "response",
-                None,
-            )
-            .await;
             Ok(Some(Message::Text(reply_text)))
         }
         "Authorize" => {
@@ -298,13 +286,25 @@ pub(crate) async fn handle_v201_call(
                     }
                     session.active_transaction_id_v201 = None;
                     session.active_badge = None;
-                    if let Some(connector_id) = session.active_connector_id_v201.take()
-                        && let Err(err) = db
+                    if let Some(connector_id) = session.active_connector_id_v201.take() {
+                        if let Err(err) = db
                             .clear_connector_transaction(&context.station_id, connector_id)
                             .await
+                        {
+                            eprintln!(
+                                "postgres clear_connector_transaction fallito per {}: {}",
+                                context.station_id, err
+                            );
+                        }
+                    } else if let Err(err) = db
+                        .clear_connector_transaction_by_ocpp_ref(
+                            &context.station_id,
+                            &request.transaction_info.transaction_id,
+                        )
+                        .await
                     {
                         eprintln!(
-                            "postgres clear_connector_transaction fallito per {}: {}",
+                            "postgres clear_connector_transaction_by_ocpp_ref fallito per {}: {}",
                             context.station_id, err
                         );
                     }
@@ -409,6 +409,19 @@ pub(crate) async fn handle_v201_call(
                 "StatusNotification 2.0.1 da {}: evse={} connector={} status={:?}",
                 context.station_id, request.evse_id, request.connector_id, request.connector_status
             );
+            let status_text = format!("{:?}", request.connector_status);
+
+            if request.connector_id > 0 {
+                maybe_auto_remote_start_on_preparing(
+                    context,
+                    session,
+                    db,
+                    sink,
+                    request.connector_id,
+                    &status_text,
+                )
+                .await;
+            }
 
             if request.connector_id > 0
                 && let Err(err) = db
@@ -416,7 +429,7 @@ pub(crate) async fn handle_v201_call(
                         &context.station_id,
                         request.connector_id,
                         Some(request.evse_id),
-                        Some(format!("{:?}", request.connector_status)),
+                        Some(status_text.clone()),
                         None,
                         Some(request.timestamp),
                     )
@@ -431,7 +444,7 @@ pub(crate) async fn handle_v201_call(
             if let Err(err) = db
                 .update_station_status(
                     &context.station_id,
-                    Some(format!("{:?}", request.connector_status)),
+                    Some(status_text),
                     None,
                     Some(request.connector_id),
                     Some(request.evse_id),

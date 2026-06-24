@@ -4,8 +4,12 @@ import {
   createEnergyMeter,
   deleteEnergyMeter,
   fetchEnergyMeterCatalog,
+  fetchEnergyMeterReadings,
+  fetchEnergyMeterStatuses,
   type EnergyMeterCatalog,
   type EnergyMeter,
+  type EnergyMeterMeasurementRow,
+  type EnergyMeterStatusView,
   type SiteEnergyMeter,
   fetchEnergyMeters,
   updateEnergyMeterRecord,
@@ -63,9 +67,26 @@ function formatDateTime(value: string | null): string {
   }).format(parsed);
 }
 
+function meterStatusPill(status: EnergyMeterStatusView | null): {
+  label: string;
+  className: string;
+} {
+  if (!status?.runtime) {
+    return { label: 'mai letto', className: 'pill-idle' };
+  }
+
+  if (status.runtime.is_online) {
+    return { label: 'online', className: 'pill-online' };
+  }
+
+  return { label: 'errore', className: 'pill-error' };
+}
+
 export function EnergyMetersPage() {
   const [meters, setMeters] = useState<EnergyMeter[]>([]);
   const [catalog, setCatalog] = useState<EnergyMeterCatalog>({ profiles: [] });
+  const [meterStatuses, setMeterStatuses] = useState<Record<string, EnergyMeterStatusView>>({});
+  const [selectedMeterReadings, setSelectedMeterReadings] = useState<EnergyMeterMeasurementRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -75,11 +96,15 @@ export function EnergyMetersPage() {
 
   useEffect(() => {
     let active = true;
-    void Promise.all([fetchEnergyMeters(), fetchEnergyMeterCatalog()])
-      .then(([loadedMeters, loadedCatalog]) => {
+    void Promise.all([fetchEnergyMeters(), fetchEnergyMeterCatalog(), fetchEnergyMeterStatuses()])
+      .then(([loadedMeters, loadedCatalog, loadedStatuses]) => {
         if (!active) return;
         setMeters(loadedMeters);
         setCatalog(loadedCatalog);
+        setMeterStatuses(
+          Object.fromEntries(loadedStatuses.map((status) => [status.meter_id, status])),
+        );
+        setSelectedMeterId((current) => current ?? loadedMeters[0]?.id ?? null);
         setError(null);
       })
       .catch((err) => {
@@ -96,6 +121,53 @@ export function EnergyMetersPage() {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    let active = true;
+
+    async function refreshStatuses() {
+      try {
+        const loadedStatuses = await fetchEnergyMeterStatuses();
+        if (!active) return;
+        setMeterStatuses(Object.fromEntries(loadedStatuses.map((status) => [status.meter_id, status])));
+      } catch (err) {
+        if (!active) return;
+        setError(err instanceof Error ? err.message : 'Errore caricando stato misuratori');
+      }
+    }
+
+    void refreshStatuses();
+    const interval = window.setInterval(() => {
+      void refreshStatuses();
+    }, 5000);
+
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!selectedMeterId) {
+      setSelectedMeterReadings([]);
+      return;
+    }
+
+    let active = true;
+    void fetchEnergyMeterReadings(selectedMeterId, 24)
+      .then((rows) => {
+        if (!active) return;
+        setSelectedMeterReadings(rows);
+      })
+      .catch((err) => {
+        if (!active) return;
+        setError(err instanceof Error ? err.message : 'Errore caricando letture misuratore');
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [selectedMeterId]);
 
   function updateMeterDraft(patch: Partial<SiteEnergyMeter>) {
     setMeterDraft((current) => ({ ...current, ...patch }));
@@ -136,12 +208,13 @@ export function EnergyMetersPage() {
         if (currentMode === 'edit' && currentSelectedMeterId) {
           const updated = await updateEnergyMeterRecord(currentSelectedMeterId, payload);
           setMeters((current) => current.map((meter) => (meter.id === currentSelectedMeterId ? updated : meter)));
+          setSelectedMeterId(updated.id);
         } else {
           const created = await createEnergyMeter(payload);
           setMeters((current) => [...current, created]);
+          setSelectedMeterId(created.id);
         }
         setMeterModalMode(null);
-        setSelectedMeterId(null);
         setMeterDraft(newEnergyMeter());
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Errore salvando misuratore energia');
@@ -157,6 +230,15 @@ export function EnergyMetersPage() {
     try {
       await deleteEnergyMeter(meterId);
       setMeters((current) => current.filter((meter) => meter.id !== meterId));
+      setMeterStatuses((current) => {
+        const next = { ...current };
+        delete next[meterId];
+        return next;
+      });
+      if (selectedMeterId === meterId) {
+        setSelectedMeterId(null);
+        setSelectedMeterReadings([]);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Errore rimuovendo misuratore energia');
     } finally {
@@ -165,10 +247,12 @@ export function EnergyMetersPage() {
   }
 
   const meterCount = meters.length;
+  const onlineCount = meters.filter((meter) => meterStatuses[meter.id]?.runtime?.is_online).length;
   const lastUpdatedAt = meters.reduce<string | null>((latest, meter) => {
     if (!latest) return meter.updated_at;
     return new Date(meter.updated_at).getTime() > new Date(latest).getTime() ? meter.updated_at : latest;
   }, null);
+  const selectedMeterStatus = selectedMeterId ? meterStatuses[selectedMeterId] ?? null : null;
 
   return (
     <>
@@ -187,7 +271,11 @@ export function EnergyMetersPage() {
               <strong>{meterCount}</strong>
             </div>
             <div>
-              <span>Ultimo salvataggio</span>
+              <span>Online</span>
+              <strong>{onlineCount}</strong>
+            </div>
+            <div>
+              <span>Ultimo salvataggio config</span>
               <strong>{formatDateTime(lastUpdatedAt)}</strong>
             </div>
           </div>
@@ -223,6 +311,10 @@ export function EnergyMetersPage() {
                 <tr>
                   <th>ID</th>
                   <th>Nome</th>
+                  <th>Stato</th>
+                  <th>Ultimo ok</th>
+                  <th>Potenza</th>
+                  <th>Energia</th>
                   <th>Profilo</th>
                   <th>Host</th>
                   <th>Porta</th>
@@ -235,10 +327,26 @@ export function EnergyMetersPage() {
               <tbody>
                 {meters.map((meter) => {
                   const profile = catalog.profiles.find((candidate) => candidate.key === meter.catalog_key);
+                  const status = meterStatuses[meter.id] ?? null;
+                  const statusPill = meterStatusPill(status);
+                  const power = status?.latest_readings.find((reading) => reading.metric_key === 'active_power_total_w');
+                  const energy = status?.latest_readings.find((reading) => reading.metric_key === 'import_energy_total_wh');
                   return (
-                    <tr key={meter.id} className={meter.id === selectedMeterId ? 'selected-row' : undefined}>
+                    <tr
+                      key={meter.id}
+                      className={meter.id === selectedMeterId ? 'selected-row' : undefined}
+                      onClick={() => setSelectedMeterId(meter.id)}
+                    >
                       <td>{meter.id}</td>
                       <td>{meter.name || 'n/a'}</td>
+                      <td>
+                        <span className={`pill ${statusPill.className}`}>
+                          {statusPill.label}
+                        </span>
+                      </td>
+                      <td>{formatDateTime(status?.runtime?.last_ok_at ?? null)}</td>
+                      <td>{power ? `${power.value_text} ${power.unit ?? ''}`.trim() : 'n/a'}</td>
+                      <td>{energy ? `${energy.value_text} ${energy.unit ?? ''}`.trim() : 'n/a'}</td>
                       <td>{profile ? `${profile.vendor} ${profile.model}` : (meter.catalog_key ?? 'n/a')}</td>
                       <td>{meter.host ?? 'n/a'}</td>
                       <td>{meter.port ?? 'n/a'}</td>
@@ -270,6 +378,102 @@ export function EnergyMetersPage() {
               </tbody>
             </table>
           </div>
+        )}
+      </article>
+
+      <article className="panel panel-table">
+        <div className="panel-header">
+          <div>
+            <h2>Letture runtime</h2>
+            <p>Ultimo stato poll e storico recente per misuratore selezionato.</p>
+          </div>
+        </div>
+
+        {!selectedMeterId ? (
+          <div className="empty-state">Seleziona un misuratore per vedere le letture.</div>
+        ) : (
+          <>
+            <div className="hero-metrics">
+              <div>
+                <span>Misuratore</span>
+                <strong>{selectedMeterId}</strong>
+              </div>
+              <div>
+                <span>Stato</span>
+                <strong>
+                  {selectedMeterStatus?.runtime
+                    ? selectedMeterStatus.runtime.is_online
+                      ? 'online'
+                      : 'errore'
+                    : 'mai letto'}
+                </strong>
+              </div>
+              <div>
+                <span>Ultimo tentativo</span>
+                <strong>{formatDateTime(selectedMeterStatus?.runtime?.last_attempt_at ?? null)}</strong>
+              </div>
+              <div>
+                <span>Errore</span>
+                <strong>{selectedMeterStatus?.runtime?.last_error ?? 'nessuno'}</strong>
+              </div>
+            </div>
+
+            {selectedMeterStatus?.latest_readings?.length ? (
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Metrica</th>
+                      <th>Valore attuale</th>
+                      <th>Unita</th>
+                      <th>Misurata alle</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {selectedMeterStatus.latest_readings.map((reading) => (
+                      <tr key={`${reading.meter_id}-${reading.metric_key}`}>
+                        <td>{reading.metric_key}</td>
+                        <td>{reading.value_text}</td>
+                        <td>{reading.unit ?? 'n/a'}</td>
+                        <td>{formatDateTime(reading.measured_at)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className="empty-state">Nessuna lettura corrente disponibile.</div>
+            )}
+
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Timestamp</th>
+                    <th>Metrica</th>
+                    <th>Valore</th>
+                    <th>Unita</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {selectedMeterReadings.length === 0 ? (
+                    <tr>
+                      <td colSpan={4}>Nessuno storico disponibile.</td>
+                    </tr>
+                  ) : (
+                    selectedMeterReadings.map((reading, index) => (
+                      <tr key={`${reading.meter_id}-${reading.metric_key}-${reading.measured_at}-${index}`}>
+                        <td>{formatDateTime(reading.measured_at)}</td>
+                        <td>{reading.metric_key}</td>
+                        <td>{reading.value_text}</td>
+                        <td>{reading.unit ?? 'n/a'}</td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </>
         )}
       </article>
 

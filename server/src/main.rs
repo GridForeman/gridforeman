@@ -4,6 +4,7 @@ mod app_state;
 mod badges;
 mod db;
 mod energy_meter_catalog;
+mod energy_meter_runtime;
 mod greptime;
 mod ocpp_runtime;
 mod ocpp_v16;
@@ -15,6 +16,7 @@ mod users;
 use app_state::ConnectionRegistry;
 use db::Database;
 use energy_meter_catalog::load_catalog;
+use energy_meter_runtime::run_energy_meter_runtime;
 use ocpp_runtime::handle_connection;
 use realtime::RealtimeNotifier;
 use tokio::net::TcpListener;
@@ -30,6 +32,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let api_energy_meter_catalog = energy_meter_catalog.clone();
     let api_connections = connections.clone();
     let api_notifier = notifier.clone();
+    let meter_runtime_db = db.clone();
+    let meter_runtime_catalog = energy_meter_catalog.clone();
     tokio::spawn(async move {
         if let Err(err) = api::run_api_server(
             api_db,
@@ -41,6 +45,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         {
             eprintln!("API server chiuso con errore: {err}");
         }
+    });
+    tokio::spawn(async move {
+        run_energy_meter_runtime(meter_runtime_db, meter_runtime_catalog).await;
     });
 
     let bind_addr = "0.0.0.0:9000";

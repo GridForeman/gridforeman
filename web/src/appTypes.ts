@@ -1,4 +1,4 @@
-import type { Badge, ConnectorSummary, SiteConfigSnapshot, StationSummary, User } from './api';
+import type { Badge, ConnectorSummary, SiteConfigSnapshot, StationConfigurationSnapshot, StationSummary, User } from './api';
 
 export type AppRoute = '/site' | '/energy-meters' | '/stations' | '/users' | '/badges' | '/events' | '/transactions';
 export type StationStatus = 'online' | 'offline' | 'error';
@@ -18,6 +18,7 @@ export type AppData = {
   users: User[];
   badges: Badge[];
   stationConnectors: ConnectorSummary[];
+  stationConfiguration: StationConfigurationSnapshot | null;
   selectedStation: StationSummary | null;
   selectedUser: User | null;
   selectedBadge: Badge | null;
@@ -48,6 +49,10 @@ export type AppActions = {
   selectStation: (stationId: string) => void;
   refreshStationStatus: (stationId: string) => Promise<void>;
   toggleStationBlocked: (stationId: string, blocked: boolean) => Promise<void>;
+  fetchStationConfiguration: (stationId: string) => Promise<void>;
+  remoteStartStationConnector: (stationId: string, connectorId: number, badgeCode: string) => Promise<void>;
+  remoteStopStationConnector: (stationId: string, connectorId: number) => Promise<void>;
+  setConnectorAutoRemoteStartBadge: (stationId: string, connectorId: number, badgeCode: string | null) => Promise<void>;
   toggleStationConnectorActive: (stationId: string, connectorId: number, active: boolean) => Promise<void>;
   unlockStationConnector: (stationId: string, connectorId: number) => Promise<void>;
   selectUser: (userId: number) => void;

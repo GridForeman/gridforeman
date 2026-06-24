@@ -27,12 +27,24 @@ export type ConnectorSummary = {
   connector_id: number;
   evse_id: number | null;
   active: boolean;
+  auto_remote_start_badge_code: string | null;
   current_status: string | null;
   current_error_code: string | null;
   current_status_at: string | null;
   active_transaction_id: number | null;
   active_transaction_ref: string | null;
   updated_at: string;
+};
+
+export type StationConfigurationEntry = {
+  key: string;
+  readonly: boolean;
+  value: string | null;
+};
+
+export type StationConfigurationSnapshot = {
+  configuration_keys: StationConfigurationEntry[];
+  unknown_keys: string[];
 };
 
 export type RealtimeStateSnapshot = {
@@ -56,6 +68,42 @@ export type SiteEnergyMeter = {
 export type EnergyMeter = SiteEnergyMeter & {
   created_at: string;
   updated_at: string;
+};
+
+export type EnergyMeterRuntimeStatus = {
+  meter_id: string;
+  is_online: boolean;
+  last_attempt_at: string;
+  last_ok_at: string | null;
+  last_error: string | null;
+  consecutive_failures: number;
+  last_poll_duration_ms: number | null;
+  updated_at: string;
+};
+
+export type EnergyMeterLatestReading = {
+  meter_id: string;
+  metric_key: string;
+  unit: string | null;
+  value_text: string;
+  value_num: number | null;
+  measured_at: string;
+  updated_at: string;
+};
+
+export type EnergyMeterStatusView = {
+  meter_id: string;
+  runtime: EnergyMeterRuntimeStatus | null;
+  latest_readings: EnergyMeterLatestReading[];
+};
+
+export type EnergyMeterMeasurementRow = {
+  meter_id: string;
+  metric_key: string;
+  unit: string | null;
+  value_text: string;
+  value_num: number | null;
+  measured_at: string;
 };
 
 export type SiteManagementGroup = {
@@ -159,6 +207,34 @@ export async function fetchEnergyMeters(): Promise<EnergyMeter[]> {
   const response = await fetch('/api/energy-meters', { cache: 'no-store' });
   if (!response.ok) {
     throw new Error(`GET /api/energy-meters failed with ${response.status}`);
+  }
+
+  return response.json();
+}
+
+export async function fetchEnergyMeterStatuses(): Promise<EnergyMeterStatusView[]> {
+  const response = await fetch('/api/energy-meters/status', { cache: 'no-store' });
+  if (!response.ok) {
+    throw new Error(`GET /api/energy-meters/status failed with ${response.status}`);
+  }
+
+  return response.json();
+}
+
+export async function fetchEnergyMeterReadings(
+  meterId: string,
+  limit = 50,
+): Promise<EnergyMeterMeasurementRow[]> {
+  const response = await fetch(`/api/energy-meters/${meterId}/readings?limit=${limit}`, {
+    cache: 'no-store',
+  });
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(
+      detail.trim()
+        ? `GET /api/energy-meters/${meterId}/readings failed with ${response.status}: ${detail}`
+        : `GET /api/energy-meters/${meterId}/readings failed with ${response.status}`,
+    );
   }
 
   return response.json();
@@ -298,6 +374,29 @@ export async function setStationConnectorActive(stationId: string, connectorId: 
   }
 }
 
+export async function setStationConnectorAutoRemoteStartBadge(
+  stationId: string,
+  connectorId: number,
+  badgeCode: string | null,
+): Promise<void> {
+  const response = await fetch(`/api/stations/${stationId}/connectors/${connectorId}/auto-remote-start-badge`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ badge_code: badgeCode }),
+  });
+
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(
+      detail.trim()
+        ? `PATCH /api/stations/${stationId}/connectors/${connectorId}/auto-remote-start-badge failed with ${response.status}: ${detail}`
+        : `PATCH /api/stations/${stationId}/connectors/${connectorId}/auto-remote-start-badge failed with ${response.status}`,
+    );
+  }
+}
+
 export async function unlockStationConnector(stationId: string, connectorId: number): Promise<void> {
   const response = await fetch(`/api/stations/${stationId}/connectors/${connectorId}/unlock`, {
     method: 'PATCH',
@@ -311,6 +410,61 @@ export async function unlockStationConnector(stationId: string, connectorId: num
         : `PATCH /api/stations/${stationId}/connectors/${connectorId}/unlock failed with ${response.status}`,
     );
   }
+}
+
+export async function remoteStartStationConnector(
+  stationId: string,
+  connectorId: number,
+  badgeCode: string,
+): Promise<void> {
+  const response = await fetch(`/api/stations/${stationId}/connectors/${connectorId}/remote-start`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ badge_code: badgeCode }),
+  });
+
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(
+      detail.trim()
+        ? `PATCH /api/stations/${stationId}/connectors/${connectorId}/remote-start failed with ${response.status}: ${detail}`
+        : `PATCH /api/stations/${stationId}/connectors/${connectorId}/remote-start failed with ${response.status}`,
+    );
+  }
+}
+
+export async function remoteStopStationConnector(stationId: string, connectorId: number): Promise<void> {
+  const response = await fetch(`/api/stations/${stationId}/connectors/${connectorId}/remote-stop`, {
+    method: 'PATCH',
+  });
+
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(
+      detail.trim()
+        ? `PATCH /api/stations/${stationId}/connectors/${connectorId}/remote-stop failed with ${response.status}: ${detail}`
+        : `PATCH /api/stations/${stationId}/connectors/${connectorId}/remote-stop failed with ${response.status}`,
+    );
+  }
+}
+
+export async function fetchStationConfiguration(stationId: string): Promise<StationConfigurationSnapshot> {
+  const response = await fetch(`/api/stations/${stationId}/configuration`, {
+    method: 'POST',
+  });
+
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(
+      detail.trim()
+        ? `POST /api/stations/${stationId}/configuration failed with ${response.status}: ${detail}`
+        : `POST /api/stations/${stationId}/configuration failed with ${response.status}`,
+    );
+  }
+
+  return response.json();
 }
 
 export type User = {

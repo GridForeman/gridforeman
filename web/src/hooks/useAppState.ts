@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useMemo, useState } from 'react';
 import {
   createBadge,
   createUser,
+  fetchStationConfiguration,
   fetchBadges,
   fetchStationConnectors,
   fetchStations,
@@ -10,6 +11,9 @@ import {
   openRealtimeStateSocket,
   setStationBlocked,
   setStationConnectorActive,
+  setStationConnectorAutoRemoteStartBadge,
+  remoteStartStationConnector,
+  remoteStopStationConnector,
   unlockStationConnector,
   setBadgeActive,
   setUserActive,
@@ -19,6 +23,7 @@ import {
   type Badge,
   type ConnectorSummary,
   type RealtimeStateSnapshot,
+  type StationConfigurationSnapshot,
   type StationSummary,
   type User,
 } from '../api';
@@ -68,6 +73,7 @@ export function useAppState(options: Options = {}) {
 
   const [stations, setStations] = useState<StationSummary[]>([]);
   const [stationConnectors, setStationConnectors] = useState<ConnectorSummary[]>([]);
+  const [stationConfiguration, setStationConfiguration] = useState<StationConfigurationSnapshot | null>(null);
   const [users, setUsers] = useState<User[]>([]);
   const [badges, setBadges] = useState<Badge[]>([]);
 
@@ -327,6 +333,10 @@ export function useAppState(options: Options = {}) {
     }
   }, [modalKind, selectedBadge]);
 
+  useEffect(() => {
+    setStationConfiguration(null);
+  }, [selectedStationId, modalKind]);
+
   const stationStatuses = stations.map((station) => getStationStatus(station));
   const onlineCount = stationStatuses.filter((status) => status === 'online').length;
   const offlineCount = stationStatuses.filter((status) => status === 'offline').length;
@@ -526,6 +536,19 @@ export function useAppState(options: Options = {}) {
     }
   }
 
+  async function fetchStationConfigurationCommand(stationId: string) {
+    setStationCommandBusy(true);
+    setFormError(null);
+    try {
+      const snapshot = await fetchStationConfiguration(stationId);
+      setStationConfiguration(snapshot);
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : 'Errore leggendo la configurazione della colonnina');
+    } finally {
+      setStationCommandBusy(false);
+    }
+  }
+
   async function toggleStationConnectorActive(stationId: string, connectorId: number, active: boolean) {
     setStationCommandBusy(true);
     setFormError(null);
@@ -536,6 +559,55 @@ export function useAppState(options: Options = {}) {
       scheduleStationSnapshotRefresh(stationId, 3000);
     } catch (err) {
       setFormError(err instanceof Error ? err.message : 'Errore aggiornando il connettore');
+    } finally {
+      setStationCommandBusy(false);
+    }
+  }
+
+  async function setConnectorAutoRemoteStartBadgeCommand(
+    stationId: string,
+    connectorId: number,
+    badgeCode: string | null,
+  ) {
+    setStationCommandBusy(true);
+    setFormError(null);
+    try {
+      await setStationConnectorAutoRemoteStartBadge(stationId, connectorId, badgeCode);
+      await syncStationConnectors(stationId);
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : 'Errore salvando il badge di auto avvio');
+    } finally {
+      setStationCommandBusy(false);
+    }
+  }
+
+  async function remoteStartStationConnectorCommand(stationId: string, connectorId: number, badgeCode: string) {
+    setStationCommandBusy(true);
+    setFormError(null);
+    try {
+      await remoteStartStationConnector(stationId, connectorId, badgeCode);
+      await syncStationSnapshot(stationId);
+      scheduleStationSnapshotRefresh(stationId, 1200);
+      scheduleStationSnapshotRefresh(stationId, 3000);
+      scheduleStationSnapshotRefresh(stationId, 6000);
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : 'Errore avviando remotamente la transazione');
+    } finally {
+      setStationCommandBusy(false);
+    }
+  }
+
+  async function remoteStopStationConnectorCommand(stationId: string, connectorId: number) {
+    setStationCommandBusy(true);
+    setFormError(null);
+    try {
+      await remoteStopStationConnector(stationId, connectorId);
+      await syncStationSnapshot(stationId);
+      scheduleStationSnapshotRefresh(stationId, 1200);
+      scheduleStationSnapshotRefresh(stationId, 3000);
+      scheduleStationSnapshotRefresh(stationId, 6000);
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : 'Errore fermando remotamente la transazione');
     } finally {
       setStationCommandBusy(false);
     }
@@ -559,6 +631,7 @@ export function useAppState(options: Options = {}) {
   const data: AppData = {
     stations,
     stationConnectors,
+    stationConfiguration,
     users,
     badges,
     selectedStation,
@@ -607,6 +680,10 @@ export function useAppState(options: Options = {}) {
     selectStation: setSelectedStationId,
     refreshStationStatus,
     toggleStationBlocked,
+    fetchStationConfiguration: fetchStationConfigurationCommand,
+    remoteStartStationConnector: remoteStartStationConnectorCommand,
+    remoteStopStationConnector: remoteStopStationConnectorCommand,
+    setConnectorAutoRemoteStartBadge: setConnectorAutoRemoteStartBadgeCommand,
     toggleStationConnectorActive,
     unlockStationConnector: unlockStationConnectorCommand,
     selectUser: setSelectedUserId,

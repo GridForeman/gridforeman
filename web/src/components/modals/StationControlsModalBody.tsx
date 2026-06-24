@@ -1,9 +1,12 @@
+import { useEffect, useMemo, useState } from 'react';
 import type { StationControlsModalBodyProps } from './modalTypes';
 import { isStationBlocked, stationAccessLabel } from '../../stations';
 
 export function StationControlsModalBody({
   selectedStation,
   selectedStationConnectors,
+  badges,
+  stationConfiguration,
   stationCommandBusy,
   formError,
   loadingStationConnectors,
@@ -11,6 +14,10 @@ export function StationControlsModalBody({
   closeModal,
   refreshStationStatus,
   toggleStationBlocked,
+  fetchStationConfiguration,
+  remoteStartStationConnector,
+  remoteStopStationConnector,
+  setConnectorAutoRemoteStartBadge,
   toggleStationConnectorActive,
   unlockStationConnector,
 }: StationControlsModalBodyProps) {
@@ -19,6 +26,29 @@ export function StationControlsModalBody({
   const stationLabel = selectedStation?.station_name?.trim() || selectedStation?.station_id || 'Nessuna colonnina selezionata';
   const connectorCount = selectedStationConnectors.length;
   const stationBlocked = selectedStation ? isStationBlocked(selectedStation) : false;
+  const remoteStartBadges = useMemo(
+    () => badges.filter((badge) => badge.active && badge.user_id != null),
+    [badges],
+  );
+  const [selectedBadgeCode, setSelectedBadgeCode] = useState('');
+  const [autoStartBadgeCodes, setAutoStartBadgeCodes] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    if (!remoteStartBadges.some((badge) => badge.badge_code === selectedBadgeCode)) {
+      setSelectedBadgeCode(remoteStartBadges[0]?.badge_code ?? '');
+    }
+  }, [remoteStartBadges, selectedBadgeCode]);
+
+  useEffect(() => {
+    setAutoStartBadgeCodes(
+      Object.fromEntries(
+        selectedStationConnectors.map((connector) => [
+          `${connector.station_id}:${connector.connector_id}`,
+          connector.auto_remote_start_badge_code ?? '',
+        ]),
+      ),
+    );
+  }, [selectedStationConnectors]);
 
   return (
     <div className="stack-form modal-form">
@@ -61,6 +91,75 @@ export function StationControlsModalBody({
         </button>
       </div>
 
+      <div className="modal-actions">
+        <button
+          className="ghost-button"
+          type="button"
+          onClick={() => void fetchStationConfiguration(selectedStation!.station_id)}
+          disabled={stationControlDisabled}
+        >
+          GetConfiguration
+        </button>
+      </div>
+
+      {stationConfiguration ? (
+        <div className="detail-card">
+          <div className="connector-card-header">
+            <div className="detail-title">Configurazione attuale</div>
+            <span className="pill pill-online">{stationConfiguration.configuration_keys.length} chiavi</span>
+          </div>
+          {stationConfiguration.configuration_keys.length > 0 ? (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Chiave</th>
+                    <th>Valore</th>
+                    <th>Accesso</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {stationConfiguration.configuration_keys.map((entry) => (
+                    <tr key={entry.key}>
+                      <td>{entry.key}</td>
+                      <td>{entry.value ?? 'n/a'}</td>
+                      <td>{entry.readonly ? 'read-only' : 'scrivibile'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div className="empty-state">Nessuna chiave restituita.</div>
+          )}
+          {stationConfiguration.unknown_keys.length > 0 ? (
+            <div className="detail-line">
+              <span>Chiavi sconosciute</span>
+              <strong>{stationConfiguration.unknown_keys.join(', ')}</strong>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      <label className="field-label">
+        Badge remote start
+        <select
+          value={selectedBadgeCode}
+          onChange={(event) => setSelectedBadgeCode(event.target.value)}
+          disabled={stationCommandBusy || remoteStartBadges.length === 0}
+        >
+          {remoteStartBadges.length === 0 ? (
+            <option value="">Nessun badge attivo assegnato</option>
+          ) : (
+            remoteStartBadges.map((badge) => (
+              <option key={badge.id} value={badge.badge_code}>
+                {badge.label?.trim() || badge.badge_code}
+              </option>
+            ))
+          )}
+        </select>
+      </label>
+
       {loadingStationConnectors ? (
         <div className="empty-state">Caricamento connettori...</div>
       ) : stationConnectorsError ? (
@@ -69,10 +168,22 @@ export function StationControlsModalBody({
         <div className="connector-grid">
           {selectedStationConnectors.map((connector) => {
             const requiresEvse = selectedStation?.ocpp_version !== '1.6';
+            const connectorKey = `${connector.station_id}:${connector.connector_id}`;
+            const autoStartBadgeCode = autoStartBadgeCodes[connectorKey] ?? '';
             const unlockDisabled =
               stationControlDisabled ||
               connector.connector_id <= 0 ||
               (requiresEvse && connector.evse_id == null);
+            const remoteStartDisabled =
+              stationControlDisabled ||
+              connector.connector_id <= 0 ||
+              connector.active_transaction_id != null ||
+              connector.active_transaction_ref != null ||
+              !selectedBadgeCode;
+            const remoteStopDisabled =
+              stationControlDisabled ||
+              connector.connector_id <= 0 ||
+              (connector.active_transaction_id == null && connector.active_transaction_ref == null);
 
             return (
               <div className="detail-card connector-card" key={`${connector.station_id}-${connector.connector_id}`}>
@@ -97,7 +208,57 @@ export function StationControlsModalBody({
                   <span>Tx</span>
                   <strong>{connector.active_transaction_id ?? connector.active_transaction_ref ?? 'n/a'}</strong>
                 </div>
+                <label className="field-label">
+                  Badge auto avvio su Preparing
+                  <select
+                    value={autoStartBadgeCode}
+                    onChange={(event) =>
+                      setAutoStartBadgeCodes((current) => ({
+                        ...current,
+                        [connectorKey]: event.target.value,
+                      }))
+                    }
+                    disabled={stationCommandBusy || remoteStartBadges.length === 0}
+                  >
+                    <option value="">Disabilitato</option>
+                    {remoteStartBadges.map((badge) => (
+                      <option key={badge.id} value={badge.badge_code}>
+                        {badge.label?.trim() || badge.badge_code}
+                      </option>
+                    ))}
+                  </select>
+                </label>
                 <div className="modal-actions">
+                  <button
+                    className="ghost-button button-success"
+                    type="button"
+                    onClick={() => void remoteStartStationConnector(selectedStation!.station_id, connector.connector_id, selectedBadgeCode)}
+                    disabled={remoteStartDisabled}
+                  >
+                    Remote start
+                  </button>
+                  <button
+                    className="ghost-button button-danger"
+                    type="button"
+                    onClick={() => void remoteStopStationConnector(selectedStation!.station_id, connector.connector_id)}
+                    disabled={remoteStopDisabled}
+                  >
+                    Remote stop
+                  </button>
+                  <button
+                    className="ghost-button"
+                    type="button"
+                    onClick={() =>
+                      void setConnectorAutoRemoteStartBadge(
+                        selectedStation!.station_id,
+                        connector.connector_id,
+                        autoStartBadgeCode || null,
+                      )
+                    }
+                    disabled={stationCommandBusy || connector.connector_id <= 0}
+                  >
+                    Salva auto avvio
+                  </button>
                   <button
                     className="ghost-button"
                     type="button"
